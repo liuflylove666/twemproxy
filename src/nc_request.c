@@ -17,6 +17,7 @@
 
 #include <nc_core.h>
 #include <nc_server.h>
+#include <proto/nc_proto.h>
 
 struct msg *
 req_get(struct conn *conn)
@@ -474,6 +475,8 @@ req_make_reply(struct context *ctx, struct conn *conn, struct msg *req)
 static bool
 req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
 {
+    struct server_pool *pool;
+
     ASSERT(conn->client && !conn->proxy);
 
     if (msg_empty(msg)) {
@@ -511,6 +514,11 @@ req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
         msg->noforward = 1;
     }
 
+    /* some commands only supports in redis master-slave pool*/
+    if (redis_master_slave_only(msg)) {
+        pool = conn->owner;
+        msg->noforward = array_n(&pool->redis_master) <= 0 ? 1 : 0;
+    }
     return false;
 }
 
@@ -576,7 +584,13 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
     key = kpos->start;
     keylen = (uint32_t)(kpos->end - kpos->start);
 
-    s_conn = server_pool_conn(ctx, c_conn->owner, key, keylen);
+    if (pool->redis && !redis_readonly(msg) && array_n(&pool->redis_master) > 0) {
+        struct server *master = array_get(&pool->redis_master, 0);
+        /* pick a connection to a given server */
+        s_conn = server_get_conn(ctx, master);
+    } else {
+        s_conn = server_pool_conn(ctx, c_conn->owner, key, keylen);
+    }
     if (s_conn == NULL) {
         req_forward_error(ctx, c_conn, msg);
         return;
@@ -747,7 +761,7 @@ req_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
 
     /* dequeue the message (request) from server inq */
     conn->dequeue_inq(ctx, conn, msg);
-
+    msg->forward_start_ts = nc_msec_now();
     /*
      * noreply request instructs the server not to send any response. So,
      * enqueue message (request) in server outq, if response is expected.

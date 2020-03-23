@@ -1,6 +1,13 @@
 # twemproxy (nutcracker) [![Build Status](https://secure.travis-ci.org/twitter/twemproxy.png)](http://travis-ci.org/twitter/twemproxy)
 
-**twemproxy** (pronounced "two-em-proxy"), aka **nutcracker** is a fast and lightweight proxy for [memcached](http://www.memcached.org/) and [redis](http://redis.io/) protocol. It was built primarily to reduce the number of connections to the caching servers on the backend. This, together with protocol pipelining and sharding enables you to horizontally scale your distributed caching architecture.
+twemproxy is a multi-process, fast and lightweight proxy for [memcached](http://www.memcached.org/) and [redis](http://redis.io/) protocol.
+It was built primarily to reduce the number of connections to the caching servers on the backend.
+This, together with protocol pipelining and sharding enables you to horizontally scale your distributed caching architecture.
+
+This is a fork of `twitter/twemproxy` to support *multi-process* and *hot-reload* features. All the developments happen
+on the `develop` branch, so we could use the master to track the upstream changes and backporting.
+
+The `develop` branch is quite stable, it's been used on the production servers at *Meitu Inc.* and reliably weathers the storm for over a year.
 
 ## Build
 
@@ -34,6 +41,10 @@ A quick checklist:
 
 ## Features
 
+* Supports master-worker's process mode(NEW)
+* Supports reload config in runtime(NEW)
+* Supports split read/write in redis master-slave(NEW)
+
 + Fast.
 + Lightweight.
 + Maintains persistent server connections.
@@ -47,7 +58,7 @@ A quick checklist:
 + Supports multiple hashing modes including consistent hashing and distribution.
 + Can be configured to disable nodes on failures.
 + Observability via stats exposed on the stats monitoring port.
-+ Works with Linux, *BSD, OS X and SmartOS (Solaris)
++ Works with Linux, \*BSD, OS X and SmartOS (Solaris)
 
 ## Help
 
@@ -113,7 +124,7 @@ Twemproxy can be configured through a YAML file specified by the -c or --conf-fi
 + **servers**: A list of server address, port and weight (name:port:weight or ip:port:weight) for this server pool.
 
 
-For example, the configuration file in [conf/nutcracker.yml](conf/nutcracker.yml), also shown below, configures 5 server pools with names - _alpha_, _beta_, _gamma_, _delta_ and omega. Clients that intend to send requests to one of the 10 servers in pool delta connect to port 22124 on 127.0.0.1. Clients that intend to send request to one of 2 servers in pool omega connect to unix path /tmp/gamma. Requests sent to pool alpha and omega have no timeout and might require timeout functionality to be implemented on the client side. On the other hand, requests sent to pool beta, gamma and delta timeout after 400 msec, 400 msec and 100 msec respectively when no response is received from the server. Of the 5 server pools, only pools alpha, gamma and delta are configured to use server ejection and hence are resilient to server failures. All the 5 server pools use ketama consistent hashing for key distribution with the key hasher for pools alpha, beta, gamma and delta set to fnv1a_64 while that for pool omega set to hsieh. Also only pool beta uses [nodes names](notes/recommendation.md#node-names-for-consistent-hashing) for consistent hashing, while pool alpha, gamma, delta and omega use 'host:port:weight' for consistent hashing. Finally, only pool alpha and beta can speak the redis protocol, while pool gamma, deta and omega speak memcached protocol.
+For example, the configuration file in [conf/nutcracker.yml](conf/nutcracker.yml), also shown below, configures 5 server pools with names - _alpha_, _beta_, _gamma_, _delta_ and omega. Clients that intend to send requests to one of the 10 servers in pool delta connect to port 22124 on 127.0.0.1. Clients that intend to send request to one of 2 servers in pool omega connect to unix path /tmp/gamma. Requests sent to pool alpha and omega have no timeout and might require timeout functionality to be implemented on the client side. On the other hand, requests sent to pool beta, gamma and delta timeout after 400 msec, 400 msec and 100 msec respectively when no response is received from the server. Of the 5 server pools, only pools alpha, gamma and delta are configured to use server ejection and hence are resilient to server failures. All the 5 server pools use ketama consistent hashing for key distribution with the key hasher for pools alpha, beta, gamma and delta set to fnv1a_64 while that for pool omega set to hsieh. Also only pool beta uses [nodes names](notes/recommendation.md#node-names-for-consistent-hashing) for consistent hashing, while pool alpha, gamma, delta and omega use 'host:port:weight' for consistent hashing. Finally, only pool alpha and beta can speak the redis protocol, while pool gamma, delta and omega speak memcached protocol.
 
     alpha:
       listen: 127.0.0.1:22121
@@ -246,11 +257,11 @@ https://launchpad.net/~twemproxy/+archive/ubuntu/daily
 + [munin-plugin](https://github.com/eveiga/contrib/tree/nutcracker/plugins/nutcracker)
 + [twemproxy-ganglia-module](https://github.com/ganglia/gmond_python_modules/tree/master/twemproxy)
 + [nagios checks](https://github.com/wanelo/nagios-checks/blob/master/check_twemproxy)
-+ [circunous](https://github.com/wanelo-chef/nad-checks/blob/master/recipes/twemproxy.rb)
++ [circonus](https://github.com/wanelo-chef/nad-checks/blob/master/recipes/twemproxy.rb)
 + [puppet module](https://github.com/wuakitv/puppet-twemproxy)
 + [nutcracker-web](https://github.com/kontera-technologies/nutcracker-web)
 + [redis-twemproxy agent](https://github.com/Stono/redis-twemproxy-agent)
-+ [sensu-metrics](https://github.com/sensu/sensu-community-plugins/blob/master/plugins/twemproxy/twemproxy-metrics.rb)
++ [sensu-metrics](https://github.com/sensu-plugins/sensu-plugins-twemproxy/blob/master/bin/metrics-twemproxy.rb)
 + [redis-mgr](https://github.com/idning/redis-mgr)
 + [smitty for twemproxy failover](https://github.com/areina/smitty)
 + [Beholder, a Python agent for twemproxy failover](https://github.com/Serekh/beholder)
@@ -292,6 +303,7 @@ https://launchpad.net/~twemproxy/+archive/ubuntu/daily
 + [Hootsuite](https://hootsuite.com)
 + [Tradesy](https://www.tradesy.com/)
 + [Uber](http://uber.com) ([details](http://highscalability.com/blog/2015/9/14/how-uber-scales-their-real-time-market-platform.html))
++ [Greta](https://greta.io/)
 
 ## Issues and Support
 

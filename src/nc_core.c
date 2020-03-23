@@ -21,8 +21,30 @@
 #include <nc_conf.h>
 #include <nc_server.h>
 #include <nc_proxy.h>
+#include <nc_process.h>
 
 static uint32_t ctx_id; /* context generation */
+
+static void
+adjust_openfiles_limit(rlim_t maxfiles) {
+    // Note: we just improve the open files to a higher num,
+    // while the twemproxy didn't support max client connections now.
+    struct rlimit limit;
+    rlim_t old_limit, best_limit = maxfiles, decr_step = 16;
+    if (getrlimit(RLIMIT_NOFILE, &limit) < 0 || best_limit <= limit.rlim_cur) {
+        return;
+    }
+    old_limit = limit.rlim_cur;
+    while(best_limit > old_limit) {
+        limit.rlim_cur = best_limit;
+        limit.rlim_max = best_limit;
+        if (setrlimit(RLIMIT_NOFILE,&limit) != -1) break;
+        /* We failed to set file limit to 'bestlimit'. Try with a
+         * smaller limit decrementing by a few FDs per iteration. */
+        if (best_limit < decr_step) break;
+        best_limit -= decr_step;
+    }
+}
 
 static rstatus_t
 core_calc_connections(struct context *ctx)
@@ -30,6 +52,7 @@ core_calc_connections(struct context *ctx)
     int status;
     struct rlimit limit;
 
+    adjust_openfiles_limit((rlim_t)ctx->cf->global.max_openfiles);
     status = getrlimit(RLIMIT_NOFILE, &limit);
     if (status < 0) {
         log_error("getrlimit failed: %s", strerror(errno));
@@ -38,16 +61,15 @@ core_calc_connections(struct context *ctx)
 
     ctx->max_nfd = (uint32_t)limit.rlim_cur;
     ctx->max_ncconn = ctx->max_nfd - ctx->max_nsconn - RESERVED_FDS;
-    log_debug(LOG_NOTICE, "max fds %"PRIu32" max client conns %"PRIu32" "
+    log_warn("max fds %"PRIu32" max client conns %"PRIu32" "
               "max server conns %"PRIu32"", ctx->max_nfd, ctx->max_ncconn,
               ctx->max_nsconn);
 
     return NC_OK;
 }
 
-static struct context *
-core_ctx_create(struct instance *nci)
-{
+struct context *
+core_ctx_create(struct instance *nci) {
     rstatus_t status;
     struct context *ctx;
 
@@ -55,7 +77,7 @@ core_ctx_create(struct instance *nci)
     if (ctx == NULL) {
         return NULL;
     }
-    ctx->id = ++ctx_id;
+    ctx->id = nci->id;
     ctx->cf = NULL;
     ctx->stats = NULL;
     ctx->evb = NULL;
@@ -65,6 +87,7 @@ core_ctx_create(struct instance *nci)
     ctx->max_nfd = 0;
     ctx->max_ncconn = 0;
     ctx->max_nsconn = 0;
+    ctx->shared_mem = NULL;
 
     /* parse and create configuration */
     ctx->cf = conf_create(nci->conf_filename);
@@ -93,15 +116,72 @@ core_ctx_create(struct instance *nci)
         return NULL;
     }
 
+    log_debug(LOG_VVERB, "created ctx %p id %"PRIu32"", ctx, ctx->id);
+    return ctx;
+}
+
+static stats_loop_t
+get_loop_callback(char role, int processes)
+{
+    if (role == ROLE_MASTER) {
+        if (processes >= 1) {
+            return stats_master_loop_callback;
+        } else {
+            return stats_loop_callback;
+        }
+    }
+    return NULL;
+}
+
+rstatus_t
+core_init_stats(struct instance *nci)
+{
+    stats_loop_t loop;
+    struct context *ctx;
+    ctx = nci->ctx;
+
+    loop = get_loop_callback(nci->role, nci->ctx->cf->global.worker_processes);
     /* create stats per server pool */
     ctx->stats = stats_create(nci->stats_port, nci->stats_addr, nci->stats_interval,
-                              nci->hostname, &ctx->pool);
+                              nci->hostname, &ctx->pool, loop);
     if (ctx->stats == NULL) {
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
         nc_free(ctx);
-        return NULL;
+        return NC_ERROR;
     }
+    ctx->stats->owner = ctx;
+
+    return NC_OK;
+}
+
+rstatus_t
+core_init_listener(struct instance *nci)
+{
+    rstatus_t status;
+    struct context *ctx;
+    ctx = nci->ctx;
+
+    /* initialize proxy per server pool */
+    status = proxy_init(ctx);
+    if (status != NC_OK) {
+        proxy_deinit(ctx);
+        server_pool_disconnect(ctx);
+        event_base_destroy(ctx->evb);
+        stats_destroy(ctx->stats);
+        server_pool_deinit(&ctx->pool);
+        conf_destroy(ctx->cf);
+        nc_free(ctx);
+        return NC_ERROR;
+    }
+    return NC_OK;
+}
+
+rstatus_t
+core_init_instance(struct instance *nci){
+    rstatus_t status;
+    struct context *ctx;
+    ctx = nci->ctx;
 
     /* initialize event handling for client, proxy and server */
     ctx->evb = event_base_create(EVENT_SIZE, &core_core);
@@ -110,7 +190,7 @@ core_ctx_create(struct instance *nci)
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
         nc_free(ctx);
-        return NULL;
+        return NC_ERROR;
     }
 
     /* preconnect? servers in server pool */
@@ -122,42 +202,38 @@ core_ctx_create(struct instance *nci)
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
         nc_free(ctx);
-        return NULL;
+        return status;
     }
 
-    /* initialize proxy per server pool */
-    status = proxy_init(ctx);
+    // add proxy listening sockets to event base
+    status = proxy_post_init(ctx);
     if (status != NC_OK) {
-        server_pool_disconnect(ctx);
-        event_base_destroy(ctx->evb);
-        stats_destroy(ctx->stats);
-        server_pool_deinit(&ctx->pool);
-        conf_destroy(ctx->cf);
-        nc_free(ctx);
-        return NULL;
+        return status;
     }
 
-    log_debug(LOG_VVERB, "created ctx %p id %"PRIu32"", ctx, ctx->id);
-
-    return ctx;
+    return NC_OK;
 }
 
-static void
+void
 core_ctx_destroy(struct context *ctx)
 {
     log_debug(LOG_VVERB, "destroy ctx %p id %"PRIu32"", ctx, ctx->id);
     proxy_deinit(ctx);
     server_pool_disconnect(ctx);
-    event_base_destroy(ctx->evb);
-    stats_destroy(ctx->stats);
     server_pool_deinit(&ctx->pool);
     conf_destroy(ctx->cf);
+    stats_destroy(ctx->stats);
+    if (ctx->shared_mem != NULL) {
+        nc_shared_mem_free(ctx->shared_mem, SHARED_MEMORY_SIZE);
+    }
+    event_base_destroy(ctx->evb);
     nc_free(ctx);
 }
 
 struct context *
 core_start(struct instance *nci)
 {
+    rstatus_t status;
     struct context *ctx;
 
     mbuf_init(nci);
@@ -167,7 +243,14 @@ core_start(struct instance *nci)
     ctx = core_ctx_create(nci);
     if (ctx != NULL) {
         nci->ctx = ctx;
-        return ctx;
+        if (ctx->cf->global.worker_processes < 1) {
+            status = nc_single_process_cycle(nci);
+        } else {
+            status = nc_multi_processes_cycle(nci);
+        }
+        if (status == NC_OK) {
+            return ctx;
+        }
     }
 
     conn_deinit();
@@ -307,7 +390,7 @@ core_timeout(struct context *ctx)
 }
 
 rstatus_t
-core_core(void *arg, uint32_t events)
+core_core(void *evb, void *arg, uint32_t events)
 {
     rstatus_t status;
     struct conn *conn = arg;
@@ -334,7 +417,8 @@ core_core(void *arg, uint32_t events)
     /* read takes precedence over write */
     if (events & EVENT_READ) {
         status = core_recv(ctx, conn);
-        if (status != NC_OK || conn->done || conn->err) {
+        /* Don't close the proxy conn, even accept error */
+        if ((status != NC_OK && conn->proxy != 1) || conn->done || conn->err) {
             core_close(ctx, conn);
             return NC_ERROR;
         }

@@ -27,6 +27,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -36,6 +37,23 @@
 #ifdef NC_HAVE_BACKTRACE
 # include <execinfo.h>
 #endif
+
+void*
+nc_shared_mem_alloc(size_t size)
+{
+    void *p;
+    p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        return NULL;
+    }
+    return p;
+}
+
+void
+nc_shared_mem_free(void *p, size_t size)
+{
+    munmap(p, size);
+}
 
 int
 nc_set_blocking(int sd)
@@ -73,6 +91,22 @@ nc_set_reuseaddr(int sd)
     len = sizeof(reuse);
 
     return setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &reuse, len);
+}
+
+int
+nc_set_reuseport(int sd)
+{
+#ifdef NC_HAVE_REUSEPORT
+    int reuse;
+    socklen_t len;
+
+    reuse = 1;
+    len = sizeof(reuse);
+
+    return setsockopt(sd, SOL_SOCKET, SO_REUSEPORT, &reuse, len);
+#else
+    return 0;
+#endif
 }
 
 /*
@@ -644,4 +678,24 @@ nc_unresolve_desc(int sd)
     }
 
     return nc_unresolve_addr(addr, addrlen);
+}
+
+rstatus_t
+nc_set_timer(int ms, int interval)
+{
+    struct itimerval tick;
+
+    if (ms <= 0) {
+        return NC_ERROR;
+    }
+
+    memset(&tick, 0, sizeof(tick));
+    tick.it_value.tv_sec = ms/1000;
+    tick.it_value.tv_usec = (ms%1000)*1000;
+    tick.it_interval.tv_sec = interval/1000;
+    tick.it_interval.tv_usec = (interval%1000)*1000;
+    if (setitimer(ITIMER_REAL, &tick, NULL) != 0) {
+        return NC_ERROR;
+    }
+    return NC_OK;
 }

@@ -21,6 +21,7 @@
 #include <nc_core.h>
 #include <nc_server.h>
 #include <nc_conf.h>
+#include <nc_client.h>
 
 static void
 server_resolve(struct server *server, struct conn *conn)
@@ -256,6 +257,7 @@ server_each_disconnect(void *elem, void *data)
         ASSERT(server->ns_conn_q > 0);
 
         conn = TAILQ_FIRST(&server->s_conn_q);
+        event_del_conn(pool->ctx->evb, conn);
         conn->close(pool->ctx, conn);
     }
 
@@ -265,12 +267,20 @@ server_each_disconnect(void *elem, void *data)
 static void
 server_failure(struct context *ctx, struct server *server)
 {
+    struct server *master;
     struct server_pool *pool = server->owner;
     int64_t now, next;
     rstatus_t status;
 
     if (!pool->auto_eject_hosts) {
         return;
+    }
+    /* redis master can't be rejected */
+    if (pool->redis && array_n(&pool->redis_master) > 0) {
+        master = (struct server *) array_get(&pool->redis_master, 0);
+        if (server == master) {
+            return;
+        }
     }
 
     server->failure_count++;
@@ -527,6 +537,7 @@ server_connect(struct context *ctx, struct server *server, struct conn *conn)
             return NC_OK;
         }
 
+        event_del_conn(ctx->evb, conn);
         log_error("connect on s %d to server '%.*s' failed: %s", conn->sd,
                   server->pname.len, server->pname.data, strerror(errno));
 
@@ -709,12 +720,32 @@ server_pool_server(struct server_pool *pool, uint8_t *key, uint32_t keylen)
 }
 
 struct conn *
+server_get_conn(struct context *ctx, struct server *srv)
+{
+    struct conn *conn;
+    rstatus_t status;
+
+    /* pick a connection to a given server */
+    conn = server_conn(srv);
+    if (conn == NULL) {
+        return NULL;
+    }
+
+    status = server_connect(ctx, srv, conn);
+    if (status != NC_OK) {
+        server_close(ctx, conn);
+        return NULL;
+    }
+
+    return conn;
+}
+
+struct conn *
 server_pool_conn(struct context *ctx, struct server_pool *pool, uint8_t *key,
                  uint32_t keylen)
 {
     rstatus_t status;
     struct server *server;
-    struct conn *conn;
 
     status = server_pool_update(pool);
     if (status != NC_OK) {
@@ -726,20 +757,7 @@ server_pool_conn(struct context *ctx, struct server_pool *pool, uint8_t *key,
     if (server == NULL) {
         return NULL;
     }
-
-    /* pick a connection to a given server */
-    conn = server_conn(server);
-    if (conn == NULL) {
-        return NULL;
-    }
-
-    status = server_connect(ctx, server, conn);
-    if (status != NC_OK) {
-        server_close(ctx, conn);
-        return NULL;
-    }
-
-    return conn;
+    return server_get_conn(ctx, server);
 }
 
 static rstatus_t
@@ -752,6 +770,12 @@ server_pool_each_preconnect(void *elem, void *data)
         return NC_OK;
     }
 
+    if (array_n(&sp->redis_master) > 0) {
+        status = array_each(&sp->redis_master, server_each_preconnect, NULL);
+        if (status != NC_OK) {
+            return status;
+        }
+    }
     status = array_each(&sp->server, server_each_preconnect, NULL);
     if (status != NC_OK) {
         return status;
@@ -896,6 +920,23 @@ server_pool_init(struct array *server_pool, struct array *conf_pool,
     return NC_OK;
 }
 
+static void
+server_pool_clients_disconnect(struct server_pool *sp)
+{
+    struct conn *conn, *nconn; /* current and next connection */
+
+    if (sp == NULL || TAILQ_EMPTY(&sp->c_conn_q) || sp->nc_conn_q == 0) {
+        return;
+    }
+    for (conn = TAILQ_FIRST(&sp->c_conn_q); conn != NULL;
+         conn = nconn) {
+        ASSERT(sp->nc_conn_q > 0);
+        nconn = TAILQ_NEXT(conn, conn_tqe);
+        client_close(sp->ctx, conn);
+    }
+    ASSERT(sp->nc_conn_q == 0);
+}
+
 void
 server_pool_deinit(struct array *server_pool)
 {
@@ -905,6 +946,8 @@ server_pool_deinit(struct array *server_pool)
         struct server_pool *sp;
 
         sp = array_pop(server_pool);
+        server_pool_clients_disconnect(sp);
+
         ASSERT(sp->p_conn == NULL);
         ASSERT(TAILQ_EMPTY(&sp->c_conn_q) && sp->nc_conn_q == 0);
 
