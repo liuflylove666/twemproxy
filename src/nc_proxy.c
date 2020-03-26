@@ -143,6 +143,7 @@ proxy_listen(struct context *ctx, struct conn *p)
         return NC_OK;
     }
 
+
     p->sd = socket(p->family, SOCK_STREAM, 0);
     if (p->sd < 0) {
         log_error("socket failed: %s", strerror(errno));
@@ -199,9 +200,10 @@ proxy_each_init(void *elem, void *data)
     struct conn *p;
 
     if (pool->p_conn != NULL) {
-        // this server pool's listener has been created in the previous cycle, we are here because of reloading, skip
+       
         return NC_OK;
     }
+
 
     p = conn_get_proxy(pool);
     if (p == NULL) {
@@ -214,11 +216,9 @@ proxy_each_init(void *elem, void *data)
         return status;
     }
 
-    log_debug(LOG_NOTICE, "p %d listening on '%.*s' in %s pool %"PRIu32" '%.*s'"
-              " with %"PRIu32" servers", p->sd, pool->addrstr.len,
-              pool->addrstr.data, pool->redis ? "redis" : "memcache",
-              pool->idx, pool->name.len, pool->name.data,
-              array_n(&pool->server));
+    log_debug(LOG_NOTICE, "p %d listening on '%.*s' in pool %"PRIu32" '%.*s'"
+              " with %"PRIu32" servers", p->sd, pool->addrstr.len, pool->addrstr.data, 
+              pool->idx, pool->name.len, pool->name.data, array_n(&pool->server));
 
     return NC_OK;
 }
@@ -232,6 +232,7 @@ proxy_init(struct context *ctx)
 
     status = array_each(&ctx->pool, proxy_each_init, NULL);
     if (status != NC_OK) {
+
         return status;
     }
 
@@ -240,6 +241,7 @@ proxy_init(struct context *ctx)
 
     return NC_OK;
 }
+
 
 rstatus_t
 proxy_each_post_init(void *elem, void *data)
@@ -326,6 +328,7 @@ proxy_deinit(struct context *ctx)
               array_n(&ctx->pool));
 }
 
+
 rstatus_t
 proxy_each_unaccept(void *elem, void *data)
 {
@@ -348,6 +351,7 @@ proxy_each_unaccept(void *elem, void *data)
 
     return NC_OK;
 }
+
 
 static rstatus_t
 proxy_accept(struct context *ctx, struct conn *p)
@@ -375,7 +379,7 @@ proxy_accept(struct context *ctx, struct conn *p)
                 return NC_OK;
             }
 
-            /*
+            /* 
              * Workaround of https://github.com/twitter/twemproxy/issues/97
              *
              * We should never reach here because the check for conn_ncurr_cconn()
@@ -407,7 +411,17 @@ proxy_accept(struct context *ctx, struct conn *p)
         break;
     }
 
-    // check total client connection count
+    /* REJECT1: reject 'accept' while pool is not ready */
+    if (pool->state != STATE_WAITING_RECV_PUB) {
+        log_warn("reject accept! pool '%.*s' is not ready, state %d", 
+                 pool->name.len, pool->name.data, pool->state);
+        status = close(sd);
+        if (status < 0) {
+            log_error("close c %d failed, ignored: %s", sd, strerror(errno));
+        }
+        return NC_OK;
+    }
+
     if (conn_ncurr_cconn() >= ctx->max_ncconn) {
         log_warn("client connections %"PRIu32" exceed limit %"PRIu32,
                   conn_ncurr_cconn(), ctx->max_ncconn);
@@ -417,6 +431,7 @@ proxy_accept(struct context *ctx, struct conn *p)
         }
         return NC_OK;
     }
+
 
     // check client connection of a server pool count
     if (pool->nc_conn_q >= pool->client_connections) {
@@ -429,7 +444,7 @@ proxy_accept(struct context *ctx, struct conn *p)
         return NC_OK;
     }
 
-    c = conn_get(p->owner, true, p->redis);
+    c = conn_get_client(p->owner);
     if (c == NULL) {
         log_error("get conn for c %d from p %d failed: %s", sd, p->sd,
                   strerror(errno));

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -214,6 +215,8 @@ stats_latency_deinit(struct array *latency)
     array_deinit(latency);
 }
 
+
+
 static rstatus_t
 server_each_map_to_stats_server(void *elem, void *data)
 {
@@ -240,19 +243,16 @@ server_each_map_to_stats_server(void *elem, void *data)
     return NC_OK;
 
 }
-
 static rstatus_t
-stats_server_map(struct array *stats_server, struct array *server, struct array *master)
+stats_server_map(struct array *stats_server, struct array *server)
 {
     rstatus_t status;
-    uint32_t nserver, nmaster;
+    uint32_t nserver;
 
     nserver = array_n(server);
     ASSERT(nserver != 0);
-    nmaster = array_n(master);
-    /* nmaster can be 0 */
 
-    status = array_init(stats_server, nserver + nmaster, sizeof(struct stats_server));
+    status = array_init(stats_server, nserver, sizeof(struct stats_server));
     if (status != NC_OK) {
         return status;
     }
@@ -262,14 +262,7 @@ stats_server_map(struct array *stats_server, struct array *server, struct array 
         return status;
     }
 
-    if (nmaster != 0) {
-        status = array_each(master, server_each_map_to_stats_server, stats_server);
-        if (status != NC_OK) {
-            return status;
-        }
-    }
-
-    log_debug(LOG_VVVERB, "map %"PRIu32" stats servers", nserver + master);
+    log_debug(LOG_VVVERB, "map %"PRIu32" stats servers", nserver);
 
     return NC_OK;
 }
@@ -305,13 +298,14 @@ stats_pool_init(struct stats_pool *stp, struct server_pool *sp)
     if (status != NC_OK) {
         return status;
     }
+
     status = stats_latency_init(&stp->latency);
     if (status != NC_OK) {
         stats_metric_deinit(&stp->metric);
         return status;
     }
 
-    status = stats_server_map(&stp->server, &sp->server, &sp->redis_master);
+    status = stats_server_map(&stp->server, &sp->server);
     if (status != NC_OK) {
         stats_metric_deinit(&stp->metric);
         stats_latency_deinit(&stp->latency);
@@ -398,10 +392,10 @@ stats_pool_unmap(struct array *stats_pool)
 static rstatus_t
 stats_create_buf(struct stats *st)
 {
-    uint32_t int64_max_digits = 20;  /* INT64_MAX = 9223372036854775807 */
-    uint32_t key_value_extra = 8;    /* "key": "value", */
-    uint32_t pool_extra = 8;         /* '"pool_name": { ' + ' }' */
-    uint32_t server_extra = 8;       /* '"server_name": { ' + ' }' */
+    uint32_t int64_max_digits = 20; /* INT64_MAX = 9223372036854775807 */
+    uint32_t key_value_extra = 8;   /* "key": "value", */
+    uint32_t pool_extra = 8;        /* '"pool_name": { ' + ' }' */
+    uint32_t server_extra = 8;      /* '"server_name": { ' + ' }' */
     uint32_t pools_tag_extra = 14;   /* '"pools": { ' + ' }' */
     uint32_t servers_tag_extra = 16; /* '"servers": { ' + ' }' */
     uint32_t latency_extra = 8;      /* '"latency": [' + '], ' */
@@ -512,6 +506,7 @@ stats_destroy_buf(struct stats *st)
     }
 }
 
+
 static rstatus_t
 stats_add_latency(struct stats *st, struct string *key, struct array *latency)
 {
@@ -539,6 +534,7 @@ stats_add_latency(struct stats *st, struct string *key, struct array *latency)
     buf->len += (size_t)n;
     return NC_OK;
 }
+
 
 static rstatus_t
 stats_add_string(struct stats *st, struct string *key, struct string *val)
@@ -741,6 +737,7 @@ stats_copy_metric(struct stats *st, struct array *metric)
     return NC_OK;
 }
 
+
 static void
 stats_aggregate_latency(struct array *dst, struct array *src)
 {
@@ -754,6 +751,7 @@ stats_aggregate_latency(struct array *dst, struct array *src)
         *bucket2 += *bucket1;
     }
 }
+
 
 static void
 stats_aggregate_metric(struct array *dst, struct array *src)
@@ -818,7 +816,7 @@ stats_aggregate(struct stats *st)
             sts1 = array_get(&stp1->server, j);
             sts2 = array_get(&stp2->server, j);
             stats_aggregate_metric(&sts2->metric, &sts1->metric);
-            stats_aggregate_latency(&sts2->latency, &sts1->latency);
+            stats_aggregate_latency(&stp2->latency, &stp1->latency);
         }
     }
 
@@ -840,6 +838,7 @@ stats_make_rsp(struct stats *st)
     if (status != NC_OK) {
         return status;
     }
+
     for (i = 0; i < array_n(&st->sum); i++) {
         struct stats_pool *stp = array_get(&st->sum, i);
         uint32_t j;
@@ -855,6 +854,7 @@ stats_make_rsp(struct stats *st)
             return status;
         }
 
+
         /* copy pool latency from sum(c) to buffer */
         status = stats_add_latency(st, &req_latency_key, &stp->latency);
         if (status != NC_OK) {
@@ -865,6 +865,8 @@ stats_make_rsp(struct stats *st)
         if (status != NC_OK) {
             return status;
         }
+
+
         for (j = 0; j < array_n(&stp->server); j++) {
             struct stats_server *sts = array_get(&stp->server, j);
 
@@ -897,17 +899,18 @@ stats_make_rsp(struct stats *st)
         }
 
         /* end nesting for servers tag */
+
         status = stats_end_nesting(st);
         if (status != NC_OK) {
             return status;
         }
     }
+
     /* end nesting for pools tag */
     status = stats_end_nesting(st);
     if (status != NC_OK) {
         return status;
     }
-
     status = stats_add_footer(st);
     if (status != NC_OK) {
         return status;
@@ -964,6 +967,7 @@ stats_loop_callback(void *arg1, void *arg2)
     /* send aggregate stats sum (c) to collector */
     stats_send_rsp(st);
 }
+
 
 static rstatus_t
 stats_each_calc_shared_mem_size(void *elem, void *data)
@@ -1055,6 +1059,8 @@ stats_master_loop_callback(void *arg1, void* arg2)
     stats_master_send_resp(st);
 }
 
+
+
 static void *
 stats_master_loop(void *arg)
 {
@@ -1062,6 +1068,7 @@ stats_master_loop(void *arg)
     event_loop_stats(st->loop, arg);
     return NULL;
 }
+
 
 static void *
 stats_worker_loop(void *arg)
@@ -1079,6 +1086,7 @@ stats_worker_loop(void *arg)
         sleep((unsigned int)(st->interval/1000));
     }
 }
+
 
 static rstatus_t
 stats_listen(struct stats *st)
@@ -1253,6 +1261,7 @@ error:
 void
 stats_destroy(struct stats *st)
 {
+
     //worker's stats will destroy in worker processes;
     if (st == NULL) {
         return;
@@ -1497,6 +1506,7 @@ _stats_server_set_ts(struct context *ctx, struct server *server,
     log_debug(LOG_VVVERB, "set ts field '%.*s' to %"PRId64"", stm->name.len,
               stm->name.data, stm->value.timestamp);
 }
+
 
 void
 _stats_pool_record_latency(struct context *ctx, struct server_pool *pool, int64_t latency)

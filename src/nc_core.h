@@ -63,6 +63,7 @@
 #define NC_HAVE_REUSEPORT
 #endif
 
+
 #define NC_OK        0
 #define NC_ERROR    -1
 #define NC_EAGAIN   -2
@@ -122,6 +123,7 @@ struct event_base;
 #include <nc_message.h>
 #include <nc_connection.h>
 #include <nc_server.h>
+#include <nc_sentinel.h>
 #include <nc_channel.h>
 
 struct context {
@@ -135,7 +137,6 @@ struct context {
     int                timeout;     /* timeout in msec */
 
     char               *shared_mem; /* shared memory for current worker for stats */
-
     uint32_t           max_nfd;     /* max # files */
     uint32_t           max_ncconn;  /* max # client connections */
     uint32_t           max_nsconn;  /* max # server connections */
@@ -143,19 +144,19 @@ struct context {
 
 
 struct instance {
-    int              id;                           /* store the worker id, master should -1 */
-    struct context   *ctx;                        /* active context */
-    int              log_level;                   /* log level */
-    char             *log_filename;               /* log filename */
-    char             *conf_filename;              /* configuration filename */
-    uint16_t         stats_port;                  /* stats monitoring port */
-    int              stats_interval;              /* stats aggregation interval */
-    char             *stats_addr;                 /* stats monitoring addr */
-    char             hostname[NC_MAXHOSTNAMELEN]; /* hostname */
-    size_t           mbuf_chunk_size;             /* mbuf chunk size */
-    pid_t            pid;                         /* process id */
-    char             *pid_filename;               /* pid filename */
-    unsigned         pidfile:1;                   /* pid file created? */
+    int              id;                         /* store the worker id, master should -1 */
+    struct context  *ctx;                        /* active context */
+    int             log_level;                   /* log level */
+    char            *log_filename;               /* log filename */
+    char            *conf_filename;              /* configuration filename */
+    uint16_t        stats_port;                  /* stats monitoring port */
+    int             stats_interval;              /* stats aggregation interval */
+    char            *stats_addr;                 /* stats monitoring addr */
+    char            hostname[NC_MAXHOSTNAMELEN]; /* hostname */
+    size_t          mbuf_chunk_size;             /* mbuf chunk size */
+    pid_t           pid;                         /* process id */
+    char            *pid_filename;               /* pid filename */
+    unsigned        pidfile:1;                   /* pid file created? */
     char             role;                        // ROLE_MASTER / ROLE_WORKER
     struct array     workers;                     // WORKERS if role == ROLE_MASTER
     struct channel*  chan;

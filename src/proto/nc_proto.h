@@ -151,16 +151,20 @@ void memcache_swallow_msg(struct conn *conn, struct msg *pmsg, struct msg *msg);
 
 void redis_parse_req(struct msg *r);
 void redis_parse_rsp(struct msg *r);
-err_t redis_failure(struct msg *r);
+err_t  redis_failure(struct msg *r);
 void redis_pre_coalesce(struct msg *r);
 void redis_post_coalesce(struct msg *r);
 rstatus_t redis_add_auth(struct context *ctx, struct conn *c_conn, struct conn *s_conn);
+rstatus_t redis_add_role(struct context *ctx, struct conn *conn);
 rstatus_t redis_fragment(struct msg *r, uint32_t ncontinuum, struct msg_tqh *frag_msgq);
 rstatus_t redis_reply(struct msg *r);
-bool redis_readonly(struct msg *r);
-bool redis_master_slave_only(struct msg *r);
 void redis_post_connect(struct context *ctx, struct conn *conn, struct server *server);
 void redis_swallow_msg(struct conn *conn, struct msg *pmsg, struct msg *msg);
-char* redis_failure_msg(err_t err);
 
+void sentinel_parse_req(struct msg *r);
+void sentinel_parse_rsp(struct msg *r);
+void sentinel_post_connect(struct context *ctx, struct conn *conn, struct server *server);
+void sentinel_swallow_msg(struct conn *conn, struct msg *pmsg, struct msg *msg);
+
+char* redis_failure_msg(err_t err);
 #endif

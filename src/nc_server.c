@@ -20,8 +20,10 @@
 
 #include <nc_core.h>
 #include <nc_server.h>
+#include <nc_sentinel.h>
 #include <nc_conf.h>
 #include <nc_client.h>
+
 
 static void
 server_resolve(struct server *server, struct conn *conn)
@@ -179,6 +181,13 @@ server_deinit(struct array *server)
         struct server *s;
 
         s = array_pop(server);
+        if (!string_empty(&s->pname)) {
+            string_deinit(&s->pname);
+        }
+        if (!string_empty(&s->addrstr)) {
+            string_deinit(&s->addrstr);
+        }
+
         ASSERT(TAILQ_EMPTY(&s->s_conn_q) && s->ns_conn_q == 0);
     }
     array_deinit(server);
@@ -199,7 +208,7 @@ server_conn(struct server *server)
      */
 
     if (server->ns_conn_q < pool->server_connections) {
-        return conn_get(server, false, pool->redis);
+        return conn_get_redis(server);
     }
     ASSERT(server->ns_conn_q == pool->server_connections);
 
@@ -216,8 +225,9 @@ server_conn(struct server *server)
     return conn;
 }
 
+
 static rstatus_t
-server_each_preconnect(void *elem, void *data)
+server_each_connect(void *elem, void *data)
 {
     rstatus_t status;
     struct server *server;
@@ -226,6 +236,7 @@ server_each_preconnect(void *elem, void *data)
 
     server = elem;
     pool = server->owner;
+    server->status = 0;
 
     conn = server_conn(server);
     if (conn == NULL) {
@@ -238,6 +249,9 @@ server_each_preconnect(void *elem, void *data)
                  server->pname.len, server->pname.data, strerror(errno));
         server_close(pool->ctx, conn);
     }
+
+    status = req_server_send_role(pool, conn);
+    if (status != NC_OK) return status;
 
     return NC_OK;
 }
@@ -265,58 +279,24 @@ server_each_disconnect(void *elem, void *data)
 }
 
 static void
-server_failure(struct context *ctx, struct server *server)
+server_failure(struct context *ctx, struct conn *conn)
 {
-    struct server *master;
+    int64_t now;
+    struct server *server = conn->owner;
     struct server_pool *pool = server->owner;
-    int64_t now, next;
-    rstatus_t status;
 
-    if (!pool->auto_eject_hosts) {
-        return;
-    }
-    /* redis master can't be rejected */
-    if (pool->redis && array_n(&pool->redis_master) > 0) {
-        master = (struct server *) array_get(&pool->redis_master, 0);
-        if (server == master) {
-            return;
-        }
-    }
-
-    server->failure_count++;
-
-    log_debug(LOG_VERB, "server '%.*s' failure count %"PRIu32" limit %"PRIu32,
-              server->pname.len, server->pname.data, server->failure_count,
-              pool->server_failure_limit);
-
-    if (server->failure_count < pool->server_failure_limit) {
-        return;
-    }
+    if (conn->sentinel) return;
 
     now = nc_usec_now();
     if (now < 0) {
         return;
     }
 
+    log_debug(LOG_VERB, "server '%.*s' failure at %"PRIu64,
+              server->pname.len, server->pname.data, now);
+
     stats_server_set_ts(ctx, server, server_ejected_at, now);
-
-    next = now + pool->server_retry_timeout;
-
-    log_debug(LOG_INFO, "update pool %"PRIu32" '%.*s' to delete server '%.*s' "
-              "for next %"PRIu32" secs", pool->idx, pool->name.len,
-              pool->name.data, server->pname.len, server->pname.data,
-              pool->server_retry_timeout / 1000 / 1000);
-
     stats_pool_incr(ctx, pool, server_ejects);
-
-    server->failure_count = 0;
-    server->next_retry = next;
-
-    status = server_pool_run(pool);
-    if (status != NC_OK) {
-        log_error("updating pool %"PRIu32" '%.*s' failed: %s", pool->idx,
-                  pool->name.len, pool->name.data, strerror(errno));
-    }
 }
 
 static void
@@ -360,13 +340,15 @@ server_close(struct context *ctx, struct conn *conn)
 
     ASSERT(!conn->client && !conn->proxy);
 
-    server_close_stats(ctx, conn->owner, conn->err, conn->eof,
-                       conn->connected);
+    if (!conn->sentinel) {
+        server_close_stats(ctx, conn->owner, conn->err, conn->eof,
+            conn->connected);
+    }
 
     conn->connected = false;
 
     if (conn->sd < 0) {
-        server_failure(ctx, conn->owner);
+        server_failure(ctx, conn);
         conn->unref(conn);
         conn_put(conn);
         return;
@@ -459,7 +441,7 @@ server_close(struct context *ctx, struct conn *conn)
 
     ASSERT(conn->smsg == NULL);
 
-    server_failure(ctx, conn->owner);
+    server_failure(ctx, conn);
 
     conn->unref(conn);
 
@@ -490,7 +472,7 @@ server_connect(struct context *ctx, struct server *server, struct conn *conn)
         return NC_OK;
     }
 
-    log_debug(LOG_VVERB, "connect to server '%.*s'", server->pname.len,
+    log_debug(LOG_NOTICE, "connect to server '%.*s'", server->pname.len,
               server->pname.data);
 
     conn->sd = socket(conn->family, SOCK_STREAM, 0);
@@ -564,7 +546,9 @@ server_connected(struct context *ctx, struct conn *conn)
     ASSERT(!conn->client && !conn->proxy);
     ASSERT(conn->connecting && !conn->connected);
 
-    stats_server_incr(ctx, server, server_connections);
+    if (!conn->sentinel) {
+        stats_server_incr(ctx, server, server_connections);
+    }
 
     conn->connecting = 0;
     conn->connected = 1;
@@ -575,66 +559,135 @@ server_connected(struct context *ctx, struct conn *conn)
               server->pname.len, server->pname.data);
 }
 
-void
-server_ok(struct context *ctx, struct conn *conn)
-{
-    struct server *server = conn->owner;
-
-    ASSERT(!conn->client && !conn->proxy);
-    ASSERT(conn->connected);
-
-    if (server->failure_count != 0) {
-        log_debug(LOG_VERB, "reset server '%.*s' failure count from %"PRIu32
-                  " to 0", server->pname.len, server->pname.data,
-                  server->failure_count);
-        server->failure_count = 0;
-        server->next_retry = 0LL;
-    }
-}
-
-static rstatus_t
-server_pool_update(struct server_pool *pool)
+rstatus_t
+server_reset(struct server *server, uint8_t *ip, uint8_t *port)
 {
     rstatus_t status;
-    int64_t now;
-    uint32_t pnlive_server; /* prev # live server */
 
-    if (!pool->auto_eject_hosts) {
-        return NC_OK;
-    }
+    struct conn *conn;
+    struct server_pool *pool;
+    struct context *ctx;
 
-    if (pool->next_rebuild == 0LL) {
-        return NC_OK;
-    }
+    uint8_t ipport[32];
 
-    now = nc_usec_now();
-    if (now < 0) {
-        return NC_ERROR;
-    }
+    pool = server->owner;
+    ctx = pool->ctx;
 
-    if (now <= pool->next_rebuild) {
-        if (pool->nlive_server == 0) {
-            errno = ECONNREFUSED;
-            return NC_ERROR;
+    log_debug(LOG_NOTICE, "reset group %d '%.*s' from '%.*s' to '%s:%s' ",
+              server->idx, server->name.len, server->name.data, 
+              server->pname.len, server->pname.data, ip, port);
+
+    /* close current connections */
+    while (!TAILQ_EMPTY(&server->s_conn_q)) {
+        conn = TAILQ_FIRST(&server->s_conn_q);
+
+        status = event_del_conn(ctx->evb, conn);
+        if (status < 0) {
+            log_warn("event del conn s %d failed, ignored: %s",
+                conn->sd, strerror(errno));
         }
-        return NC_OK;
+        conn->close(ctx, conn);
     }
 
-    pnlive_server = pool->nlive_server;
-
-    status = server_pool_run(pool);
-    if (status != NC_OK) {
-        log_error("updating pool %"PRIu32" with dist %d failed: %s", pool->idx,
-                  pool->dist_type, strerror(errno));
+    /* reset 'pname' */
+    if (!string_empty(&server->pname)) {
+        string_deinit(&server->pname);
+    }
+    nc_snprintf(ipport, sizeof(ipport), "%s:%s", ip, port);
+    status = string_copy(&server->pname, ipport, (uint32_t)(nc_strlen(ipport)));
+    if (status != NC_OK){
+        log_error("failed to copy 'ipport'");
         return status;
     }
 
-    log_debug(LOG_INFO, "update pool %"PRIu32" '%.*s' to add %"PRIu32" servers",
-              pool->idx, pool->name.len, pool->name.data,
-              pool->nlive_server - pnlive_server);
+    /* reset 'addstr' */
+    if (!string_empty(&server->addrstr)) {
+        string_deinit(&server->addrstr);
+    }
+    status = string_copy(&server->addrstr, ip, (uint32_t)(nc_strlen(ip)));
+    if (status != NC_OK){
+        log_error("failed to copy 'ip'");
+        return status;
+    }
 
+    /* reset 'port' */
+    server->port = (uint16_t)nc_atoi(port, nc_strlen(port));
 
     return NC_OK;
+}
+
+void
+server_swallow_role_rsp(struct conn *conn, struct msg *msg)
+{
+    struct server *server, *s;
+    struct server_pool *pool;
+    struct server *sentinel;
+    struct mbuf *mbuf;
+
+    uint8_t *pos;
+    uint32_t i;
+
+    server = conn->owner;
+    pool = server->owner;
+    sentinel = pool->sentinel;
+    log_debug(LOG_NOTICE, "recv 'ROLE' rsp from redis");
+
+    if (pool->state != STATE_WAITING_ROLE_RSP) {
+        log_error("recv invalid msg[ROLE RSP] while the state machine is: %d", pool->state);
+        return;
+    }
+
+    /*  request : role
+        response:
+                        *3              *5              *3             ->0
+                        $6              $5              $6             ->1
+                        master          slave           master         ->2
+                        :20734          $13             :58681
+                        *1              10.180.156.16   *0    
+                        *3              :6380        
+                        $13             $9           
+                        10.180.156.16   connected    
+                        $4              :1780        
+                        6379
+                        $5
+                        20734
+     */
+    mbuf = STAILQ_FIRST(&msg->mhdr);
+    pos = mbuf->start;
+    for (i = 0; i < 2; ++i) {
+        pos = nc_strchr(pos, mbuf->last, CR);
+        if (pos == NULL) {
+            log_error("ROLE rsp format error on %s | %s", 
+                      pool->name.data, server->pname.data);
+            return;
+        }
+        pos += 1;
+    }
+    pos += 1;
+    if (0 != nc_strncmp(pos, MARK_MASTER, nc_strlen(MARK_MASTER))) {
+        log_warn("ROLE failed on %s | %.*s", pool->name.data, server->pname.len, server->pname.data);
+        return;
+    }
+
+    server->status = 1;
+    sentinel->weight--;
+
+    /* trigger next flow */
+    if (sentinel->weight == 0) {
+        /* check status of every server */
+        for (i = 0; i < array_n(&pool->server); ++i) {
+            s = (struct server *)array_get(&pool->server, i);
+            if (s->status == 0) return;
+        }
+
+        struct conn *s_conn = sentinel_conn(sentinel);
+        if (s_conn != NULL && s_conn->connected) {
+            req_sentinel_send_heartbeat(pool->ctx, s_conn);
+            pool->state = STATE_WAITING_PSUB_RSP;
+        }
+    }
+
+    return;
 }
 
 static uint32_t
@@ -719,6 +772,7 @@ server_pool_server(struct server_pool *pool, uint8_t *key, uint32_t keylen)
     return server;
 }
 
+
 struct conn *
 server_get_conn(struct context *ctx, struct server *srv)
 {
@@ -740,15 +794,20 @@ server_get_conn(struct context *ctx, struct server *srv)
     return conn;
 }
 
+
+
 struct conn *
 server_pool_conn(struct context *ctx, struct server_pool *pool, uint8_t *key,
                  uint32_t keylen)
 {
-    rstatus_t status;
+    // rstatus_t status;
     struct server *server;
+    // struct conn *conn;
 
-    status = server_pool_update(pool);
-    if (status != NC_OK) {
+    /* REJECT2: reject requests while pool is not ready */
+    if (pool->state != STATE_WAITING_RECV_PUB) {
+        log_debug(LOG_INFO, "reject requests! pool '%.*s' is not ready, state %d", 
+                  pool->name.len, pool->name.data, pool->state);
         return NULL;
     }
 
@@ -757,6 +816,7 @@ server_pool_conn(struct context *ctx, struct server_pool *pool, uint8_t *key,
     if (server == NULL) {
         return NULL;
     }
+
     return server_get_conn(ctx, server);
 }
 
@@ -766,19 +826,10 @@ server_pool_each_preconnect(void *elem, void *data)
     rstatus_t status;
     struct server_pool *sp = elem;
 
-    if (!sp->preconnect) {
-        return NC_OK;
-    }
-
-    if (array_n(&sp->redis_master) > 0) {
-        status = array_each(&sp->redis_master, server_each_preconnect, NULL);
-        if (status != NC_OK) {
-            return status;
-        }
-    }
-    status = array_each(&sp->server, server_each_preconnect, NULL);
-    if (status != NC_OK) {
-        return status;
+    status = sentinel_connect(sp);
+    if (status == NC_ENOMEM) {
+        /* program will exit while 'NC_ENOMEM' */
+        return NC_ENOMEM;
     }
 
     return NC_OK;
@@ -797,11 +848,28 @@ server_pool_preconnect(struct context *ctx)
     return NC_OK;
 }
 
+rstatus_t
+server_pool_connect(struct context *ctx, struct server_pool *pool)
+{
+    rstatus_t status;
+
+    status = array_each(&pool->server, server_each_connect, NULL);
+    if (status != NC_OK) {
+        log_error("why failed to connect: %d ?", status);
+        return status;
+    }
+
+    return 0;
+}
+
 static rstatus_t
 server_pool_each_disconnect(void *elem, void *data)
 {
     rstatus_t status;
     struct server_pool *sp = elem;
+    struct server *sentinel = sp->sentinel;
+
+    server_each_disconnect(sentinel, sp);
 
     status = array_each(&sp->server, server_each_disconnect, NULL);
     if (status != NC_OK) {
@@ -836,6 +904,7 @@ server_pool_each_calc_connections(void *elem, void *data)
 
     ctx->max_nsconn += sp->server_connections * array_n(&sp->server);
     ctx->max_nsconn += 1; /* pool listening socket */
+    ctx->max_ncconn += 1; /* sentinel connection */
 
     return NC_OK;
 }
@@ -920,6 +989,7 @@ server_pool_init(struct array *server_pool, struct array *conf_pool,
     return NC_OK;
 }
 
+
 static void
 server_pool_clients_disconnect(struct server_pool *sp)
 {
@@ -937,6 +1007,7 @@ server_pool_clients_disconnect(struct server_pool *sp)
     ASSERT(sp->nc_conn_q == 0);
 }
 
+
 void
 server_pool_deinit(struct array *server_pool)
 {
@@ -947,7 +1018,7 @@ server_pool_deinit(struct array *server_pool)
 
         sp = array_pop(server_pool);
         server_pool_clients_disconnect(sp);
-
+        
         ASSERT(sp->p_conn == NULL);
         ASSERT(TAILQ_EMPTY(&sp->c_conn_q) && sp->nc_conn_q == 0);
 
@@ -959,6 +1030,7 @@ server_pool_deinit(struct array *server_pool)
         }
 
         server_deinit(&sp->server);
+        sentinel_deinit(&sp->sentinels);
 
         log_debug(LOG_DEBUG, "deinit pool %"PRIu32" '%.*s'", sp->idx,
                   sp->name.len, sp->name.data);

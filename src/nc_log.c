@@ -26,6 +26,7 @@
 
 static struct logger logger;
 
+
 const char * log_level_names[LOG_LEVEN_N] = {
     "EMERG",
     "ALERT",
@@ -40,6 +41,7 @@ const char * log_level_names[LOG_LEVEN_N] = {
     "VVVERB",
     "PVERB"
 };
+
 
 int
 log_init(int level, char *name)

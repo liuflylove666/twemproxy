@@ -33,6 +33,7 @@
 
 #define STATS_SERVER_CODEC(ACTION)                                                                                  \
     /* server behavior */                                                                                           \
+    ACTION( server_failover,        STATS_COUNTER,      "# failover of the group")                                  \
     ACTION( server_eof,             STATS_COUNTER,      "# eof on server connections")                              \
     ACTION( server_err,             STATS_COUNTER,      "# errors on server connections")                           \
     ACTION( server_timedout,        STATS_COUNTER,      "# timeouts on server connections")                         \
@@ -72,8 +73,8 @@ struct stats_metric {
 };
 
 struct stats_server {
-    struct string name;     /* server name (ref) */
-    struct array  metric;   /* stats_metric[] for server codec */
+    struct string name;   /* server name (ref) */
+    struct array  metric; /* stats_metric[] for server codec */
     struct array  latency;  /* lantency[] for server request latency */
 };
 
@@ -92,7 +93,6 @@ struct stats_buffer {
 
 struct stats {
     struct context      *owner;
-
     uint16_t            port;            /* stats monitoring port */
     int                 interval;        /* stats aggregation interval */
     struct string       addr;            /* stats monitoring address */
@@ -188,6 +188,7 @@ typedef enum stats_server_field {
      _stats_pool_record_latency(_ctx, _pool, _val);                 \
 } while (0)
 
+
 #else
 
 #define stats_pool_incr(_ctx, _pool, _name)
@@ -221,21 +222,23 @@ void _stats_pool_decr(struct context *ctx, struct server_pool *pool, stats_pool_
 void _stats_pool_incr_by(struct context *ctx, struct server_pool *pool, stats_pool_field_t fidx, int64_t val);
 void _stats_pool_decr_by(struct context *ctx, struct server_pool *pool, stats_pool_field_t fidx, int64_t val);
 void _stats_pool_set_ts(struct context *ctx, struct server_pool *pool, stats_pool_field_t fidx, int64_t val);
+void _stats_server_record_latency(struct context *ctx, struct server *server, int64_t latency);
+void _stats_pool_record_latency(struct context *ctx, struct server_pool *pool, int64_t latency);
+
 
 void _stats_server_incr(struct context *ctx, struct server *server, stats_server_field_t fidx);
 void _stats_server_decr(struct context *ctx, struct server *server, stats_server_field_t fidx);
 void _stats_server_incr_by(struct context *ctx, struct server *server, stats_server_field_t fidx, int64_t val);
 void _stats_server_decr_by(struct context *ctx, struct server *server, stats_server_field_t fidx, int64_t val);
 void _stats_server_set_ts(struct context *ctx, struct server *server, stats_server_field_t fidx, int64_t val);
-void _stats_server_record_latency(struct context *ctx, struct server *server, int64_t latency);
-void _stats_pool_record_latency(struct context *ctx, struct server_pool *pool, int64_t latency);
 
 struct stats *stats_create(uint16_t stats_port, char *stats_ip, int stats_interval, char *source, struct array *server_pool, stats_loop_t loop);
 void stats_destroy(struct stats *stats);
 void stats_swap(struct stats *stats);
+
+
 void stats_loop_callback(void *arg1, void *arg2);
 void stats_master_loop_callback(void *arg1, void *arg2);
 rstatus_t stats_shared_memory_init(struct stats *stats, int processes);
 void stats_shared_memory_deinit(struct stats *stats);
-
 #endif

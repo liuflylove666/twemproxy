@@ -26,7 +26,7 @@ rsp_get(struct conn *conn)
 
     ASSERT(!conn->client && !conn->proxy);
 
-    msg = msg_get(conn, false, conn->redis);
+    msg = msg_get(conn, false);
     if (msg == NULL) {
         conn->err = errno;
     }
@@ -81,7 +81,7 @@ rsp_make_error(struct context *ctx, struct conn *conn, struct msg *msg)
         rsp_put(pmsg);
     }
 
-    return msg_get_error(conn->redis, err);
+    return msg_get_error(true, err);
 }
 
 struct msg *
@@ -143,6 +143,7 @@ static bool
 rsp_filter(struct context *ctx, struct conn *conn, struct msg *msg)
 {
     struct msg *pmsg;
+
     err_t  err;
     ASSERT(!conn->client && !conn->proxy);
 
@@ -242,9 +243,6 @@ rsp_forward(struct context *ctx, struct conn *s_conn, struct msg *msg)
     ASSERT(!s_conn->client && !s_conn->proxy);
     msgsize = msg->mlen;
 
-    /* response from server implies that server is ok and heartbeating */
-    server_ok(ctx, s_conn);
-
     /* dequeue peer message (request) from server */
     pmsg = TAILQ_FIRST(&s_conn->omsg_q);
     ASSERT(pmsg != NULL && pmsg->peer == NULL);
@@ -277,20 +275,20 @@ rsp_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
               struct msg *nmsg)
 {
     struct msg *pmsg;
-
     ASSERT(!conn->client && !conn->proxy);
     ASSERT(msg != NULL && conn->rmsg == msg);
     ASSERT(!msg->request);
     ASSERT(msg->owner == conn);
     ASSERT(nmsg == NULL || !nmsg->request);
 
+
     pmsg = TAILQ_FIRST(&conn->omsg_q);
     if (pmsg) {
         stats_server_record_latency(ctx, conn->owner, nc_msec_now()-pmsg->forward_start_ts);
     }
-
     /* enqueue next message (response), if any */
     conn->rmsg = nmsg;
+
     if (rsp_filter(ctx, conn, msg)) {
         return;
     }
@@ -377,7 +375,6 @@ rsp_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
     conn->dequeue_outq(ctx, conn, pmsg);
 
     req_put(pmsg);
-
     if (pm_terminate) {
         conn->done = 1;
     }

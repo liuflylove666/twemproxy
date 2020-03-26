@@ -17,7 +17,9 @@
 
 #include <nc_core.h>
 #include <nc_server.h>
+
 #include <proto/nc_proto.h>
+
 
 struct msg *
 req_get(struct conn *conn)
@@ -26,7 +28,7 @@ req_get(struct conn *conn)
 
     ASSERT(conn->client && !conn->proxy);
 
-    msg = msg_get(conn, true, conn->redis);
+    msg = msg_get(conn, true);
     if (msg == NULL) {
         conn->err = errno;
     }
@@ -89,7 +91,7 @@ req_log(struct msg *req)
 
     req_type = msg_type_string(req->type);
 
-    log_debug(LOG_NOTICE, "req %"PRIu64" done on c %d req_time %"PRIi64".%03"PRIi64
+    log_debug(LOG_INFO, "req %"PRIu64" done on c %d req_time %"PRIi64".%03"PRIi64
               " msec type %.*s narg %"PRIu32" req_len %"PRIu32" rsp_len %"PRIu32
               " key0 '%s' peer '%s' done %d error %d",
               req->id, req->owner->sd, req_time / 1000, req_time % 1000,
@@ -129,7 +131,7 @@ req_put(struct msg *msg)
 bool
 req_done(struct conn *conn, struct msg *msg)
 {
-    struct msg *cmsg, *pmsg; /* current and previous message */
+    struct msg *cmsg/*, *pmsg*/; /* current and previous message */
     uint64_t id;             /* fragment id */
     uint32_t nfragment;      /* # fragment */
 
@@ -156,18 +158,18 @@ req_done(struct conn *conn, struct msg *msg)
 
     /* check all fragments of the given request vector are done */
 
-    for (pmsg = msg, cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
+    for (/*pmsg = msg, */cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         pmsg = cmsg, cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
+         /*pmsg = cmsg, */cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
 
         if (!cmsg->done) {
             return false;
         }
     }
 
-    for (pmsg = msg, cmsg = TAILQ_NEXT(msg, c_tqe);
+    for (/*pmsg = msg, */cmsg = TAILQ_NEXT(msg, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         pmsg = cmsg, cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
+         /*pmsg = cmsg, */cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
 
         if (!cmsg->done) {
             return false;
@@ -185,16 +187,16 @@ req_done(struct conn *conn, struct msg *msg)
     msg->fdone = 1;
     nfragment = 0;
 
-    for (pmsg = msg, cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
+    for (/*pmsg = msg, */cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         pmsg = cmsg, cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
+         /*pmsg = cmsg, */cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
         cmsg->fdone = 1;
         nfragment++;
     }
 
-    for (pmsg = msg, cmsg = TAILQ_NEXT(msg, c_tqe);
+    for (/*pmsg = msg, */cmsg = TAILQ_NEXT(msg, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         pmsg = cmsg, cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
+         /*pmsg = cmsg, */cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
         cmsg->fdone = 1;
         nfragment++;
     }
@@ -303,7 +305,7 @@ req_server_enqueue_imsgq(struct context *ctx, struct conn *conn, struct msg *msg
      * the server in_q; the clock continues to tick until it either expires
      * or the message is dequeued from the server out_q
      *
-     * noreply request are free from timeouts because client is not intrested
+     * noreply request are free from timeouts because client is not interested
      * in the response anyway!
      */
     if (!msg->noreply) {
@@ -312,6 +314,7 @@ req_server_enqueue_imsgq(struct context *ctx, struct conn *conn, struct msg *msg
 
     TAILQ_INSERT_TAIL(&conn->imsg_q, msg, s_tqe);
 
+    if (conn->sentinel) return;
     stats_server_incr(ctx, conn->owner, in_queue);
     stats_server_incr_by(ctx, conn->owner, in_queue_bytes, msg->mlen);
 }
@@ -336,6 +339,7 @@ req_server_enqueue_imsgq_head(struct context *ctx, struct conn *conn, struct msg
 
     TAILQ_INSERT_HEAD(&conn->imsg_q, msg, s_tqe);
 
+    if (conn->sentinel) return;
     stats_server_incr(ctx, conn->owner, in_queue);
     stats_server_incr_by(ctx, conn->owner, in_queue_bytes, msg->mlen);
 }
@@ -348,6 +352,7 @@ req_server_dequeue_imsgq(struct context *ctx, struct conn *conn, struct msg *msg
 
     TAILQ_REMOVE(&conn->imsg_q, msg, s_tqe);
 
+    if (conn->sentinel) return;
     stats_server_decr(ctx, conn->owner, in_queue);
     stats_server_decr_by(ctx, conn->owner, in_queue_bytes, msg->mlen);
 }
@@ -369,6 +374,7 @@ req_server_enqueue_omsgq(struct context *ctx, struct conn *conn, struct msg *msg
 
     TAILQ_INSERT_TAIL(&conn->omsg_q, msg, s_tqe);
 
+    if (conn->sentinel) return;
     stats_server_incr(ctx, conn->owner, out_queue);
     stats_server_incr_by(ctx, conn->owner, out_queue_bytes, msg->mlen);
 }
@@ -392,6 +398,7 @@ req_server_dequeue_omsgq(struct context *ctx, struct conn *conn, struct msg *msg
 
     TAILQ_REMOVE(&conn->omsg_q, msg, s_tqe);
 
+    if (conn->sentinel) return;
     stats_server_decr(ctx, conn->owner, out_queue);
     stats_server_decr_by(ctx, conn->owner, out_queue_bytes, msg->mlen);
 }
@@ -456,7 +463,7 @@ req_make_reply(struct context *ctx, struct conn *conn, struct msg *req)
 {
     struct msg *rsp;
 
-    rsp = msg_get(conn, false, conn->redis); /* replay */
+    rsp = msg_get(conn, false); /* replay */
     if (rsp == NULL) {
         conn->err = errno;
         return NC_ENOMEM;
@@ -475,8 +482,6 @@ req_make_reply(struct context *ctx, struct conn *conn, struct msg *req)
 static bool
 req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
 {
-    struct server_pool *pool;
-
     ASSERT(conn->client && !conn->proxy);
 
     if (msg_empty(msg)) {
@@ -514,11 +519,6 @@ req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
         msg->noforward = 1;
     }
 
-    /* some commands only supports in redis master-slave pool*/
-    if (redis_master_slave_only(msg)) {
-        pool = conn->owner;
-        msg->noforward = array_n(&pool->redis_master) <= 0 ? 1 : 0;
-    }
     return false;
 }
 
@@ -565,7 +565,7 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
 {
     rstatus_t status;
     struct conn *s_conn;
-    struct server_pool *pool;
+    /*struct server_pool *pool;*/
     uint8_t *key;
     uint32_t keylen;
     struct keypos *kpos;
@@ -577,20 +577,14 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
         c_conn->enqueue_outq(ctx, c_conn, msg);
     }
 
-    pool = c_conn->owner;
+    /*pool = c_conn->owner;*/
 
     ASSERT(array_n(msg->keys) > 0);
     kpos = array_get(msg->keys, 0);
     key = kpos->start;
     keylen = (uint32_t)(kpos->end - kpos->start);
 
-    if (pool->redis && !redis_readonly(msg) && array_n(&pool->redis_master) > 0) {
-        struct server *master = array_get(&pool->redis_master, 0);
-        /* pick a connection to a given server */
-        s_conn = server_get_conn(ctx, master);
-    } else {
-        s_conn = server_pool_conn(ctx, c_conn->owner, key, keylen);
-    }
+    s_conn = server_pool_conn(ctx, c_conn->owner, key, keylen);
     if (s_conn == NULL) {
         req_forward_error(ctx, c_conn, msg);
         return;
@@ -754,13 +748,13 @@ req_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
     ASSERT(!conn->client && !conn->proxy);
     ASSERT(msg != NULL && conn->smsg == NULL);
     ASSERT(msg->request && !msg->done);
-    ASSERT(msg->owner != conn);
 
     log_debug(LOG_VVERB, "send done req %"PRIu64" len %"PRIu32" type %d on "
               "s %d", msg->id, msg->mlen, msg->type, conn->sd);
 
     /* dequeue the message (request) from server inq */
     conn->dequeue_inq(ctx, conn, msg);
+
     msg->forward_start_ts = nc_msec_now();
     /*
      * noreply request instructs the server not to send any response. So,
@@ -773,3 +767,128 @@ req_send_done(struct context *ctx, struct conn *conn, struct msg *msg)
         req_put(msg);
     }
 }
+
+#define SENTINEL_GET_MASTER_ADDR "*3\r\n$8\r\nsentinel\r\n$23\r\nget-master-addr-by-name\r\n$%d\r\n%s\r\n"
+
+rstatus_t
+req_sentinel_send_get_master_addr(struct context *ctx, struct conn *conn)
+{
+    rstatus_t status;
+    struct server *server;
+    struct server_pool *sp;
+
+    uint32_t i;
+    struct string *group;
+
+    struct msg *msg;
+
+    server = conn->owner;
+    sp = server->owner;
+
+    /* sentinel get-master-addr-by-name group  */
+    for (i = 0; i < array_n(&sp->groups); ++i) {
+        group = array_get(&sp->groups, i);
+
+        msg = msg_get(conn, true);
+        if (msg == NULL) {
+            log_error("failed to get msg");
+            return NC_ENOMEM;
+        }
+
+        status = msg_prepend_format(msg, SENTINEL_GET_MASTER_ADDR, group->len, group->data);
+        if (status != NC_OK) {
+            log_error("failed to prepend msg format");
+            msg_put(msg);
+            return status;
+        }
+
+        /* enqueue the message (request) into server inq */
+        if (TAILQ_EMPTY(&conn->imsg_q)) {
+            status = event_add_out(ctx->evb, conn);
+            if (status != NC_OK) {
+                conn->err = errno;
+                msg_put(msg);
+                log_error("failed to call event_add_out: %d", conn->err);
+                return NC_ERROR;
+            }
+        }
+        conn->enqueue_inq(ctx, conn, msg);
+        log_debug(LOG_NOTICE, "sent 'sentinel get-master-addr-by-name %s' req to '%.*s'", 
+                  group->data, server->pname.len, server->pname.data);
+    }
+
+    return NC_OK;
+}
+
+rstatus_t
+req_sentinel_send_heartbeat(struct context *ctx, struct conn *conn)
+{
+    rstatus_t status;
+    struct server *server;
+    struct msg *msg;
+
+    server = conn->owner;
+
+    /* psubscribe +switch-master */
+    msg = msg_get(conn, true);
+    if (msg == NULL) {
+        log_error("failed to get msg");
+        return NC_ENOMEM;
+    }
+
+    status = msg_prepend_format(msg, "*2\r\n$10\r\npsubscribe\r\n$14\r\n+switch-master\r\n");
+    if (status != NC_OK) {
+        log_error("failed to prepend msg format");
+        msg_put(msg);
+        return status;
+    }
+
+    /* enqueue the message (request) into server inq */
+    if (TAILQ_EMPTY(&conn->imsg_q)) {
+        status = event_add_out(ctx->evb, conn);
+        if (status != NC_OK) {
+            conn->err = errno;
+            msg_put(msg);
+            log_error("failed to call event_add_out: %d", conn->err);
+            return NC_ERROR;
+        }
+    }
+    conn->enqueue_inq(ctx, conn, msg);
+    log_debug(LOG_NOTICE, "sent 'psubscribe +switch-master' req to '%.*s'", 
+              server->pname.len, server->pname.data);
+
+    return NC_OK;
+}
+
+rstatus_t
+req_server_send_role(struct server_pool *pool, struct conn *conn)
+{
+    rstatus_t status;
+
+    if (TAILQ_EMPTY(&conn->imsg_q)) {
+        status = event_add_out(pool->ctx->evb, conn);
+        if (status != NC_OK) {
+            conn->err = errno;
+            return NC_ERROR;
+        }
+    }
+
+    if (!conn_authenticated(conn)) {
+        status = redis_add_auth(pool->ctx, conn, conn);
+        if (status != NC_OK) {
+            log_error("failed to add auth msg");
+            conn->err = status;
+            return NC_ERROR;
+        }
+    }
+
+    status = redis_add_role(pool->ctx, conn);
+    if (status != NC_OK) {
+        log_error("failed to add role msg");
+        conn->err = status;
+        return NC_ERROR;
+    }
+
+    return NC_OK;
+}
+
