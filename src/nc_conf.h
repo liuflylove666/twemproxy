@@ -48,6 +48,7 @@
 #define CONF_DEFAULT_TIMEOUT                 -1
 #define CONF_DEFAULT_LISTEN_BACKLOG          512
 #define CONF_DEFAULT_CLIENT_CONNECTIONS      2048
+#define CONF_DEFAULT_REDIS                   false
 #define CONF_DEFAULT_REDIS_DB                0
 #define CONF_DEFAULT_SERVER_RETRY_TIMEOUT    30 * 1000      /* in msec */
 #define CONF_DEFAULT_SERVER_FAILURE_LIMIT    2
@@ -71,7 +72,7 @@ struct conf_listen {
 };
 
 struct conf_server {
-    struct string   pname;      /* server: as "hostname:port" */
+    struct string   pname;      /* server: as "hostname:port:weight" */
     struct string   name;       /* hostname:port or [name] */
     struct string   addrstr;    /* hostname */
     int             port;       /* port */
@@ -89,6 +90,7 @@ struct conf_pool {
     int                backlog;               /* backlog: */
     int                client_connections;    /* client_connections: */
     int                tcpkeepalive;          /* tcpkeepalive: */
+    int                redis;                 /* redis: */
     struct string      redis_auth;            /* redis_auth: redis auth password (matches requirepass on redis) */
     int                redis_db;              /* redis_db: redis db */
     int                server_connections;    /* server_connections: */

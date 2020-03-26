@@ -131,7 +131,7 @@ req_put(struct msg *msg)
 bool
 req_done(struct conn *conn, struct msg *msg)
 {
-    struct msg *cmsg/*, *pmsg*/; /* current and previous message */
+    struct msg *cmsg; /* current and previous message */
     uint64_t id;             /* fragment id */
     uint32_t nfragment;      /* # fragment */
 
@@ -158,18 +158,18 @@ req_done(struct conn *conn, struct msg *msg)
 
     /* check all fragments of the given request vector are done */
 
-    for (/*pmsg = msg, */cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
+    for (cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         /*pmsg = cmsg, */cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
+         cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
 
         if (!cmsg->done) {
             return false;
         }
     }
 
-    for (/*pmsg = msg, */cmsg = TAILQ_NEXT(msg, c_tqe);
+    for (cmsg = TAILQ_NEXT(msg, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         /*pmsg = cmsg, */cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
+         cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
 
         if (!cmsg->done) {
             return false;
@@ -187,16 +187,16 @@ req_done(struct conn *conn, struct msg *msg)
     msg->fdone = 1;
     nfragment = 0;
 
-    for (/*pmsg = msg, */cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
+    for (cmsg = TAILQ_PREV(msg, msg_tqh, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         /*pmsg = cmsg, */cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
+         cmsg = TAILQ_PREV(cmsg, msg_tqh, c_tqe)) {
         cmsg->fdone = 1;
         nfragment++;
     }
 
-    for (/*pmsg = msg, */cmsg = TAILQ_NEXT(msg, c_tqe);
+    for (cmsg = TAILQ_NEXT(msg, c_tqe);
          cmsg != NULL && cmsg->frag_id == id;
-         /*pmsg = cmsg, */cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
+         cmsg = TAILQ_NEXT(cmsg, c_tqe)) {
         cmsg->fdone = 1;
         nfragment++;
     }
@@ -577,7 +577,6 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
         c_conn->enqueue_outq(ctx, c_conn, msg);
     }
 
-    /*pool = c_conn->owner;*/
 
     ASSERT(array_n(msg->keys) > 0);
     kpos = array_get(msg->keys, 0);

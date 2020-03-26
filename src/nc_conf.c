@@ -81,6 +81,10 @@ static struct command conf_pool_commands[] = {
       conf_set_num,
       offsetof(struct conf_pool, client_connections) },
 
+    { string("redis"),
+      conf_set_bool,
+      offsetof(struct conf_pool, redis) },
+
     { string("tcpkeepalive"),
       conf_set_bool,
       offsetof(struct conf_pool, tcpkeepalive) },
@@ -93,9 +97,26 @@ static struct command conf_pool_commands[] = {
       conf_set_num,
       offsetof(struct conf_pool, redis_db) },
 
+    // { string("preconnect"),
+    //   conf_set_bool,
+    //   offsetof(struct conf_pool, preconnect) },
+
+    // { string("auto_eject_hosts"),
+    //   conf_set_bool,
+    //   offsetof(struct conf_pool, auto_eject_hosts) },
+
+
     { string("server_connections"),
       conf_set_num,
       offsetof(struct conf_pool, server_connections) },
+
+    // { string("server_retry_timeout"),
+    //   conf_set_num,
+    //   offsetof(struct conf_pool, server_retry_timeout) },
+
+    // { string("server_failure_limit"),
+    //   conf_set_num,
+    //   offsetof(struct conf_pool, server_failure_limit) },
 
     { string("groups"),
       conf_add_group,
@@ -154,7 +175,10 @@ conf_server_init(struct conf_server *cs)
     string_init(&cs->name);
     string_init(&cs->addrstr);
     cs->port = 0;
+    // cs->weight = 0;
+
     memset(&cs->info, 0, sizeof(cs->info));
+
     cs->valid = 0;
 
     log_debug(LOG_VVERB, "init conf server %p", cs);
@@ -215,9 +239,9 @@ conf_sentinel_each_transform(void *elem, void *data)
     s->idx = array_idx(server, s);
     s->owner = NULL;
 
-    s->pname = cs->pname;/* ref */
-    s->name = cs->name;/* ref */
-    s->addrstr = cs->addrstr;/* ref */
+    s->pname = cs->pname;
+    s->name = cs->name;
+    s->addrstr = cs->addrstr;
     s->port = (uint16_t)cs->port;
     s->weight = 1;
 
@@ -247,6 +271,7 @@ conf_pool_init(struct conf_pool *cp, struct string *name)
 
     string_init(&cp->listen.pname);
     string_init(&cp->listen.name);
+    string_init(&cp->redis_auth);
     cp->listen.port = 0;
     memset(&cp->listen.info, 0, sizeof(cp->listen.info));
     cp->listen.valid = 0;
@@ -260,14 +285,15 @@ conf_pool_init(struct conf_pool *cp, struct string *name)
 
     cp->client_connections = CONF_UNSET_NUM;
 
+    cp->redis = CONF_UNSET_NUM;
     cp->tcpkeepalive = CONF_UNSET_NUM;
-    string_init(&cp->redis_auth);
     cp->redis_db = CONF_UNSET_NUM;
     cp->server_connections = CONF_UNSET_NUM;
 
     array_null(&cp->groups);
 
     cp->sentinel_heartbeat = CONF_UNSET_NUM;
+
     array_null(&cp->sentinels);
 
     cp->valid = 0;
@@ -360,22 +386,26 @@ conf_pool_each_transform(void *elem, void *data)
 
     nc_memcpy(&sp->info, &cp->listen.info, sizeof(cp->listen.info));
     sp->perm = cp->listen.perm;
-    sp->dist_type = cp->distribution;
+
     sp->key_hash_type = cp->hash;
     sp->key_hash = hash_algos[cp->hash];
+    sp->dist_type = cp->distribution;
     sp->hash_tag = cp->hash_tag;
+
+    sp->tcpkeepalive = cp->tcpkeepalive ? 1 : 0;
+
+    sp->redis = cp->redis ? 1 : 0;
 
     sp->timeout = cp->timeout;
     sp->backlog = cp->backlog;
     sp->redis_db = cp->redis_db;
 
-    sp->client_connections = (uint32_t)cp->client_connections;
-    sp->server_connections = (uint32_t)cp->server_connections;
-
     sp->redis_auth = cp->redis_auth;
     sp->require_auth = cp->redis_auth.len > 0 ? 1 : 0;
 
-    sp->tcpkeepalive = cp->tcpkeepalive ? 1 : 0;
+    sp->client_connections = (uint32_t)cp->client_connections;
+    sp->server_connections = (uint32_t)cp->server_connections;
+
 
     sp->groups = cp->groups;
     status = server_init(&sp->server, &sp->groups, sp);
@@ -397,7 +427,7 @@ conf_pool_each_transform(void *elem, void *data)
 static void
 conf_dump(struct conf *cf)
 {
-    uint32_t i, j, npool, n;
+    uint32_t i, j, npool, nserver;
     struct conf_pool *cp;
     struct string *s;
 
@@ -415,12 +445,13 @@ conf_dump(struct conf *cf)
         log_debug(LOG_VVERB, "%.*s", cp->name.len, cp->name.data);
         log_debug(LOG_VVERB, "  listen: %.*s",
                   cp->listen.pname.len, cp->listen.pname.data);
+        log_debug(LOG_VVERB, "  timeout: %d", cp->timeout);
+        log_debug(LOG_VVERB, "  backlog: %d", cp->backlog);
         log_debug(LOG_VVERB, "  hash: %d", cp->hash);
         log_debug(LOG_VVERB, "  hash_tag: \"%.*s\"", cp->hash_tag.len,
                   cp->hash_tag.data);
         log_debug(LOG_VVERB, "  distribution: %d", cp->distribution);
-        log_debug(LOG_VVERB, "  timeout: %d", cp->timeout);
-        log_debug(LOG_VVERB, "  backlog: %d", cp->backlog);
+        log_debug(LOG_VVERB, "  redis: %d", cp->redis);
         log_debug(LOG_VVERB, "  client_connections: %d",
                   cp->client_connections);
         log_debug(LOG_VVERB, "  tcpkeepalive: %d", cp->tcpkeepalive);
@@ -430,18 +461,18 @@ conf_dump(struct conf *cf)
         log_debug(LOG_VVERB, "  server_connections: %d",
                   cp->server_connections);
 
-        n = array_n(&cp->groups);
-        log_debug(LOG_VVERB, "  groups: %"PRIu32"", n);
-        for (j = 0; j < n; j++) {
+        nserver = array_n(&cp->groups);
+        log_debug(LOG_VVERB, "  groups: %"PRIu32"", nserver);
+        for (j = 0; j < nserver; j++) {
             s = array_get(&cp->groups, j);
             log_debug(LOG_VVERB, "    %.*s", s->len, s->data);
         }
 
         log_debug(LOG_VVERB, "  sentinel_heartbeat: %d", cp->sentinel_heartbeat);
 
-        n = array_n(&cp->sentinels);
-        log_debug(LOG_VVERB, "  sentinels: %"PRIu32"", n);
-        for (j = 0; j < n; j++) {
+        nserver = array_n(&cp->sentinels);
+        log_debug(LOG_VVERB, "  sentinels: %"PRIu32"", nserver);
+        for (j = 0; j < nserver; j++) {
             s = array_get(&cp->sentinels, j);
             log_debug(LOG_VVERB, "    %.*s", s->len, s->data);
         }
@@ -1282,7 +1313,7 @@ conf_validate_structure(struct conf *cf)
                 } else {
                     error = true;
                     log_error("conf: '%s' missing sequence directive at depth "
-                              "%d", cf->fname, depth);
+                                  "%d", cf->fname, depth);
                 }
             } else if (pools_section && depth == CONF_SECTION_ROOT_DEPTH) {
                 pools_section = false; // "pools" section finish
@@ -1453,11 +1484,11 @@ conf_validate_group(struct conf *cf, struct conf_pool *cp)
 static rstatus_t
 conf_validate_sentinel(struct conf *cf, struct conf_pool *cp)
 {
-    uint32_t i, n;
+    uint32_t i, nserver;
     bool valid;
 
-    n = array_n(&cp->sentinels);
-    if (n == 0) {
+    nserver = array_n(&cp->sentinels);
+    if (nserver == 0) {
         log_error("conf: pool '%.*s' has no sentinels", cp->name.len,
                   cp->name.data);
         return NC_ERROR;
@@ -1470,7 +1501,7 @@ conf_validate_sentinel(struct conf *cf, struct conf_pool *cp)
      * "host:port:weight"
      */
     array_sort(&cp->sentinels, conf_sentinel_name_cmp);
-    for (valid = true, i = 0; i < n - 1; i++) {
+    for (valid = true, i = 0; i < nserver - 1; i++) {
         struct conf_server *cs1, *cs2;
 
         cs1 = array_get(&cp->sentinels, i);
@@ -1506,12 +1537,12 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
 
     /* set default values for unset directives */
 
-    if (cp->hash == CONF_UNSET_HASH) {
-        cp->hash = CONF_DEFAULT_HASH;
-    }
-
     if (cp->distribution == CONF_UNSET_DIST) {
         cp->distribution = CONF_DEFAULT_DIST;
+    }
+
+    if (cp->hash == CONF_UNSET_HASH) {
+        cp->hash = CONF_DEFAULT_HASH;
     }
 
     if (cp->timeout == CONF_UNSET_NUM) {
@@ -1529,6 +1560,10 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
         return NC_ERROR;
     }
 
+    if (cp->redis == CONF_UNSET_NUM) {
+        cp->redis = CONF_DEFAULT_REDIS;
+    }
+
     if (cp->tcpkeepalive == CONF_UNSET_NUM) {
         cp->tcpkeepalive = CONF_DEFAULT_TCPKEEPALIVE;
     }
@@ -1544,13 +1579,13 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
         return NC_ERROR;
     }
 
+    if (cp->sentinel_heartbeat == CONF_UNSET_NUM) {
+        cp->sentinel_heartbeat = CONF_DEFAULT_SENTINEL_HEARTBEAT;
+    }
+
     status = conf_validate_group(cf, cp);
     if (status != NC_OK) {
         return status;
-    }
-
-    if (cp->sentinel_heartbeat == CONF_UNSET_NUM) {
-        cp->sentinel_heartbeat = CONF_DEFAULT_SENTINEL_HEARTBEAT;
     }
 
     status = conf_validate_sentinel(cf, cp);
@@ -1742,7 +1777,6 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
 
     if (value->data[0] == '/') {
         uint8_t *q, *start, *perm;
-        /*uint32_t permlen;*/
 
 
         /* parse "socket_path permissions" from the end */
@@ -1755,7 +1789,7 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
             namelen = value->len;
         } else {
             perm = q + 1;
-            /*permlen = (uint32_t)(p - perm + 1);*/
+            
 
             p = q - 1;
             name = start;

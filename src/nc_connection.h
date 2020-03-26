@@ -88,14 +88,14 @@ struct conn {
     unsigned            connected:1;     /* connected? */
     unsigned            eof:1;           /* eof? aka passive close? */
     unsigned            done:1;          /* done? aka close? */
+    unsigned            redis:1;         /* redis? */
     unsigned            authenticated:1; /* authenticated? */
 };
 
 TAILQ_HEAD(conn_tqh, conn);
 
 struct context *conn_to_ctx(struct conn *conn);
-struct conn *conn_get_client(void *owner);
-struct conn *conn_get_redis(void *owner);
+struct conn *conn_get(void *owner, bool client, bool redis);
 struct conn *conn_get_proxy(void *owner);
 struct conn *conn_get_sentinel(void *owner);
 void conn_put(struct conn *conn);

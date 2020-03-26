@@ -165,8 +165,9 @@ _conn_get(void)
     return conn;
 }
 
+
 struct conn *
-conn_get_client(void *owner)
+conn_get(void *owner, bool client, bool redis)
 {
     struct conn *conn;
 
@@ -175,70 +176,76 @@ conn_get_client(void *owner)
         return NULL;
     }
 
-    conn->client = 1;
+    /* connection either handles redis or memcache messages */
+    conn->redis = redis ? 1 : 0;
 
-    conn->recv = msg_recv;
-    conn->recv_next = req_recv_next;
-    conn->recv_done = req_recv_done;
+    conn->client = client ? 1 : 0;
 
-    conn->send = msg_send;
-    conn->send_next = rsp_send_next;
-    conn->send_done = rsp_send_done;
+    if (conn->client) {
+        /*
+         * client receives a request, possibly parsing it, and sends a
+         * response downstream.
+         */
+        conn->recv = msg_recv;
+        conn->recv_next = req_recv_next;
+        conn->recv_done = req_recv_done;
 
-    conn->close = client_close;
-    conn->active = client_active;
+        conn->send = msg_send;
+        conn->send_next = rsp_send_next;
+        conn->send_done = rsp_send_done;
 
-    conn->ref = client_ref;
-    conn->unref = client_unref;
+        conn->close = client_close;
+        conn->active = client_active;
 
-    conn->enqueue_inq = NULL;
-    conn->dequeue_inq = NULL;
-    conn->enqueue_outq = req_client_enqueue_omsgq;
-    conn->dequeue_outq = req_client_dequeue_omsgq;
-    conn->post_connect = NULL;
-    conn->swallow_msg = NULL;
+        conn->ref = client_ref;
+        conn->unref = client_unref;
 
-    ncurr_cconn++;
+        conn->enqueue_inq = NULL;
+        conn->dequeue_inq = NULL;
+        conn->enqueue_outq = req_client_enqueue_omsgq;
+        conn->dequeue_outq = req_client_dequeue_omsgq;
+        conn->post_connect = NULL;
+        conn->swallow_msg = NULL;
 
-    conn->ref(conn, owner);
-    log_debug(LOG_VVERB, "get conn %p client", conn);
+        ncurr_cconn++;
+    } else {
+        /*
+         * server receives a response, possibly parsing it, and sends a
+         * request upstream.
+         */
+        conn->recv = msg_recv;
+        conn->recv_next = rsp_recv_next;
+        conn->recv_done = rsp_recv_done;
 
-    return conn;
-}
+        conn->send = msg_send;
+        conn->send_next = req_send_next;
+        conn->send_done = req_send_done;
 
-struct conn *
-conn_get_redis(void *owner)
-{
-    struct conn *conn;
+        conn->close = server_close;
+        conn->active = server_active;
 
-    conn = _conn_get();
-    if (conn == NULL) {
-        return NULL;
+        conn->ref = server_ref;
+        conn->unref = server_unref;
+
+        conn->enqueue_inq = req_server_enqueue_imsgq;
+        conn->dequeue_inq = req_server_dequeue_imsgq;
+        conn->enqueue_outq = req_server_enqueue_omsgq;
+        conn->dequeue_outq = req_server_dequeue_omsgq;
+        // if (redis) {
+        //   conn->post_connect = redis_post_connect;
+        //   conn->swallow_msg = redis_swallow_msg;
+        // } else {
+        //   conn->post_connect = memcache_post_connect;
+        //   conn->swallow_msg = memcache_swallow_msg;
+        // }
+
+        conn->post_connect = redis_post_connect;
+        conn->swallow_msg = redis_swallow_msg;
+
     }
 
-    conn->recv = msg_recv;
-    conn->recv_next = rsp_recv_next;
-    conn->recv_done = rsp_recv_done;
-
-    conn->send = msg_send;
-    conn->send_next = req_send_next;
-    conn->send_done = req_send_done;
-
-    conn->close = server_close;
-    conn->active = server_active;
-
-    conn->ref = server_ref;
-    conn->unref = server_unref;
-
-    conn->enqueue_inq = req_server_enqueue_imsgq;
-    conn->dequeue_inq = req_server_dequeue_imsgq;
-    conn->enqueue_outq = req_server_enqueue_omsgq;
-    conn->dequeue_outq = req_server_dequeue_omsgq;
-    conn->post_connect = redis_post_connect;
-    conn->swallow_msg = redis_swallow_msg;
-
     conn->ref(conn, owner);
-    log_debug(LOG_VVERB, "get conn %p redis", conn);
+    log_debug(LOG_VVERB, "get conn %p client %d", conn, conn->client);
 
     return conn;
 }

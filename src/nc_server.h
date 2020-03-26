@@ -134,6 +134,7 @@ struct server_pool {
     uint32_t           server_connections;   /* maximum # server connection */
     struct string      redis_auth;           /* redis_auth password (matches requirepass on redis) */
     unsigned           require_auth;         /* require_auth? */
+    unsigned           redis:1;              /* redis? */
     unsigned           tcpkeepalive:1;       /* tcpkeepalive? */
 };
 

@@ -12,6 +12,7 @@ pools:
     distribution: ketama
     timeout: 400
     redis_auth: 123456
+    redis: true
     groups:
      - groups_helf_0
      - groups_helf_1
