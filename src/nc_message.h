@@ -36,6 +36,31 @@ typedef enum msg_parse_result {
 
 #define MSG_TYPE_CODEC(ACTION)                                                                      \
     ACTION( UNKNOWN )                                                                               \
+    ACTION( REQ_MC_GET )                       /* memcache retrieval requests */                    \
+    ACTION( REQ_MC_GETS )                                                                           \
+    ACTION( REQ_MC_DELETE )                    /* memcache delete request */                        \
+    ACTION( REQ_MC_CAS )                       /* memcache cas request and storage request */       \
+    ACTION( REQ_MC_SET )                       /* memcache storage request */                       \
+    ACTION( REQ_MC_ADD )                                                                            \
+    ACTION( REQ_MC_REPLACE )                                                                        \
+    ACTION( REQ_MC_APPEND )                                                                         \
+    ACTION( REQ_MC_PREPEND )                                                                        \
+    ACTION( REQ_MC_INCR )                      /* memcache arithmetic request */                    \
+    ACTION( REQ_MC_DECR )                                                                           \
+    ACTION( REQ_MC_TOUCH )                     /* memcache touch request */                         \
+    ACTION( REQ_MC_QUIT )                      /* memcache quit request */                          \
+    ACTION( RSP_MC_NUM )                       /* memcache arithmetic response */                   \
+    ACTION( RSP_MC_STORED )                    /* memcache cas and storage response */              \
+    ACTION( RSP_MC_NOT_STORED )                                                                     \
+    ACTION( RSP_MC_EXISTS )                                                                         \
+    ACTION( RSP_MC_NOT_FOUND )                                                                      \
+    ACTION( RSP_MC_END )                                                                            \
+    ACTION( RSP_MC_VALUE )                                                                          \
+    ACTION( RSP_MC_DELETED )                   /* memcache delete response */                       \
+    ACTION( RSP_MC_TOUCHED )                   /* memcache touch response */                        \
+    ACTION( RSP_MC_ERROR )                     /* memcache error responses */                       \
+    ACTION( RSP_MC_CLIENT_ERROR )                                                                   \
+    ACTION( RSP_MC_SERVER_ERROR )                                                                   \
     ACTION( REQ_REDIS_DEL )                    /* redis commands - keys */                          \
     ACTION( REQ_REDIS_EXISTS )                                                                      \
     ACTION( REQ_REDIS_EXPIRE )                                                                      \
@@ -245,6 +270,7 @@ struct msg {
     unsigned             done:1;          /* done? */
     unsigned             fdone:1;         /* all fragments are done? */
     unsigned             swallow:1;       /* swallow response? */
+    unsigned             redis:1;         /* redis? */
 };
 
 TAILQ_HEAD(msg_tqh, msg);
@@ -258,7 +284,7 @@ void msg_init(void);
 void msg_deinit(void);
 struct string *msg_type_string(msg_type_t type);
 struct msg *msg_get_raw(void *owner);
-struct msg *msg_get(struct conn *conn, bool request);
+struct msg *msg_get(struct conn *conn, bool request, bool redis);
 void msg_put(struct msg *msg);
 struct msg *msg_get_error(bool redis, err_t err);
 void msg_dump(struct msg *msg, int level);

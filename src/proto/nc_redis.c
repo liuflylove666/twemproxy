@@ -2637,7 +2637,7 @@ redis_fragment_argx(struct msg *r, uint32_t ncontinuum, struct msg_tqh *frag_msg
         uint32_t idx = msg_backend_idx(r, kpos->start, kpos->end - kpos->start);
 
         if (sub_msgs[idx] == NULL) {
-            sub_msgs[idx] = msg_get(r->owner, r->request);
+            sub_msgs[idx] = msg_get(r->owner, r->request, r->redis);
             if (sub_msgs[idx] == NULL) {
                 nc_free(sub_msgs);
                 return NC_ENOMEM;
@@ -2963,7 +2963,7 @@ redis_add_auth(struct context *ctx, struct conn *c_conn, struct conn *s_conn)
     server = s_conn->owner;
     pool = server->owner;
 
-    msg = msg_get(c_conn, true);
+    msg = msg_get(c_conn, true, c_conn->redis);
     if (msg == NULL) {
         c_conn->err = errno;
         return NC_ENOMEM;
@@ -2997,7 +2997,7 @@ redis_add_role(struct context *ctx, struct conn *conn)
     server = (struct server *)conn->owner;
     pool = server->owner;
 
-    msg = msg_get(conn, true);
+    msg = msg_get(conn, true, conn->redis);
     if (msg == NULL) {
         conn->err = errno;
         return NC_ENOMEM;
@@ -3043,7 +3043,7 @@ redis_post_connect(struct context *ctx, struct conn *conn, struct server *server
      * message to be head of queue as it might already contain a command
      * that triggered the connect.
      */
-    msg = msg_get(conn, true);
+    msg = msg_get(conn, true, conn->redis);
     if (msg == NULL) {
         return;
     }

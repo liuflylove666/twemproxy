@@ -303,8 +303,9 @@ msg_get_raw(void *owner)
     return msg;
 }
 
+
 struct msg *
-msg_get(struct conn *conn, bool request)
+msg_get(struct conn *conn, bool request, bool redis)
 {
     struct msg *msg;
 
@@ -315,35 +316,55 @@ msg_get(struct conn *conn, bool request)
 
     msg->owner = conn;
     msg->request = request ? 1 : 0;
+    msg->redis = redis ? 1 : 0;
 
-    if (conn->sentinel) {
-        if (request) {
-            msg->parser = sentinel_parse_req;
-            msg->swallow = 1;
+    log_debug(LOG_NOTICE, "msg_get  redis:%d", redis);
+    if (redis) {
+        log_debug(LOG_NOTICE, "if msg_get  redis:%d", redis);
+        if (conn->sentinel) {
+            if (request) {
+                msg->parser = sentinel_parse_req;
+                msg->swallow = 1;
+            } else {
+                msg->parser = sentinel_parse_rsp;
+            }
         } else {
-            msg->parser = sentinel_parse_rsp;
+            if (request) {
+                msg->parser = redis_parse_req;
+            } else {
+                msg->parser = redis_parse_rsp;
+            }
+            msg->add_auth = redis_add_auth;
+            msg->fragment = redis_fragment;
+            msg->reply = redis_reply;
+            msg->failure = redis_failure;
+            msg->pre_coalesce = redis_pre_coalesce;
+            msg->post_coalesce = redis_post_coalesce;
         }
+
     } else {
         if (request) {
-            msg->parser = redis_parse_req;
+            msg->parser = memcache_parse_req;
         } else {
-            msg->parser = redis_parse_rsp;
+            msg->parser = memcache_parse_rsp;
         }
-        msg->add_auth = redis_add_auth;
-        msg->fragment = redis_fragment;
-        msg->reply = redis_reply;
-        msg->failure = redis_failure;
-        msg->pre_coalesce = redis_pre_coalesce;
-        msg->post_coalesce = redis_post_coalesce;
+        msg->add_auth = memcache_add_auth;
+        msg->fragment = memcache_fragment;
+        msg->failure = memcache_failure;
+        msg->pre_coalesce = memcache_pre_coalesce;
+        msg->post_coalesce = memcache_post_coalesce;
     }
-    
-    msg->start_ts = nc_usec_now();
+
+    if (log_loggable(LOG_NOTICE) != 0) {
+        msg->start_ts = nc_usec_now();
+    }
 
     log_debug(LOG_VVERB, "get msg %p id %"PRIu64" request %d owner sd %d",
               msg, msg->id, msg->request, conn->sd);
 
     return msg;
 }
+
 
 struct msg *
 msg_get_error(bool redis, err_t err)
@@ -615,7 +636,7 @@ msg_parsed(struct context *ctx, struct conn *conn, struct msg *msg)
         return NC_ENOMEM;
     }
 
-    nmsg = msg_get(msg->owner, msg->request);
+    nmsg = msg_get(msg->owner, msg->request, conn->redis);
     if (nmsg == NULL) {
         mbuf_put(nbuf);
         return NC_ENOMEM;

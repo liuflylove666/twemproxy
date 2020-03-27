@@ -26,7 +26,7 @@ rsp_get(struct conn *conn)
 
     ASSERT(!conn->client && !conn->proxy);
 
-    msg = msg_get(conn, false);
+    msg = msg_get(conn, false, conn->redis);
     if (msg == NULL) {
         conn->err = errno;
     }
@@ -81,7 +81,7 @@ rsp_make_error(struct context *ctx, struct conn *conn, struct msg *msg)
         rsp_put(pmsg);
     }
 
-    return msg_get_error(true, err);
+    return msg_get_error(conn->redis, err);
 }
 
 struct msg *

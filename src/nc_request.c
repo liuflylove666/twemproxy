@@ -28,7 +28,7 @@ req_get(struct conn *conn)
 
     ASSERT(conn->client && !conn->proxy);
 
-    msg = msg_get(conn, true);
+    msg = msg_get(conn, true, conn->redis);
     if (msg == NULL) {
         conn->err = errno;
     }
@@ -463,7 +463,7 @@ req_make_reply(struct context *ctx, struct conn *conn, struct msg *req)
 {
     struct msg *rsp;
 
-    rsp = msg_get(conn, false); /* replay */
+    rsp = msg_get(conn, false, conn->redis); /* replay */
     if (rsp == NULL) {
         conn->err = errno;
         return NC_ENOMEM;
@@ -784,11 +784,12 @@ req_sentinel_send_get_master_addr(struct context *ctx, struct conn *conn)
     server = conn->owner;
     sp = server->owner;
 
+    log_debug(LOG_NOTICE, "req_sentinel_send_get_master_addr :%d", conn->redis);
     /* sentinel get-master-addr-by-name group  */
     for (i = 0; i < array_n(&sp->groups); ++i) {
         group = array_get(&sp->groups, i);
 
-        msg = msg_get(conn, true);
+        msg = msg_get(conn, true, conn->redis);
         if (msg == NULL) {
             log_error("failed to get msg");
             return NC_ENOMEM;
@@ -829,7 +830,7 @@ req_sentinel_send_heartbeat(struct context *ctx, struct conn *conn)
     server = conn->owner;
 
     /* psubscribe +switch-master */
-    msg = msg_get(conn, true);
+    msg = msg_get(conn, true, conn->redis);
     if (msg == NULL) {
         log_error("failed to get msg");
         return NC_ENOMEM;
