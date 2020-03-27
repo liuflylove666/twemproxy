@@ -288,7 +288,7 @@ conn_get_proxy(void *owner)
 }
 
 struct conn *
-conn_get_sentinel(void *owner)
+conn_get_sentinel(void *owner, bool redis)
 {
     struct conn *conn;
 
@@ -296,6 +296,8 @@ conn_get_sentinel(void *owner)
     if (conn == NULL) {
         return NULL;
     }
+
+    conn->redis = redis ? 1 : 0;
 
     conn->sentinel = 1;
 

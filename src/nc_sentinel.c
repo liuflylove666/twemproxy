@@ -93,10 +93,15 @@ sentinel_get(struct server_pool *sp)
 struct conn *
 sentinel_conn(struct server *server)
 {
-    struct conn* conn;
+    struct server_pool *pool;
+    struct conn *conn;
+
+    pool = server->owner;
+
+    log_debug(LOG_NOTICE, "sentinel_conn pool redis:%d", pool->redis);
 
     if (server->ns_conn_q == 0) {
-        return conn_get_sentinel(server);
+        return conn_get_sentinel(server, pool->redis);
     }
     ASSERT(server->ns_conn_q == 1);
 
@@ -129,6 +134,7 @@ sentinel_connect(struct server_pool *sp)
         return NC_ERROR;
     }
 
+    log_debug(LOG_NOTICE, "sentinel_connect1111  redis:%d", conn->redis);
     status = server_connect(sp->ctx, server, conn);
     if(status != NC_OK) {
         sentinel_close(sp->ctx, conn);
