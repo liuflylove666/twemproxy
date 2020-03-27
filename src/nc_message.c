@@ -284,6 +284,7 @@ done:
     msg->done = 0;
     msg->fdone = 0;
     msg->swallow = 0;
+    msg->redis = 0;
 
     return msg;
 }
