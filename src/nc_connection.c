@@ -21,6 +21,7 @@
 #include <nc_server.h>
 #include <nc_client.h>
 #include <nc_proxy.h>
+#include <nc_sentinel.h>
 #include <proto/nc_proto.h>
 
 /*
@@ -151,6 +152,7 @@ _conn_get(void)
 
     conn->client = 0;
     conn->proxy = 0;
+    conn->sentinel = 0;
     conn->connecting = 0;
     conn->connected = 0;
     conn->eof = 0;
@@ -163,6 +165,7 @@ _conn_get(void)
 
     return conn;
 }
+
 
 struct conn *
 conn_get(void *owner, bool client, bool redis)
@@ -244,18 +247,16 @@ conn_get(void *owner, bool client, bool redis)
     return conn;
 }
 
+
 struct conn *
 conn_get_proxy(void *owner)
 {
-    struct server_pool *pool = owner;
     struct conn *conn;
 
     conn = _conn_get();
     if (conn == NULL) {
         return NULL;
     }
-
-    conn->redis = pool->redis;
 
     conn->proxy = 1;
 
@@ -279,8 +280,48 @@ conn_get_proxy(void *owner)
     conn->dequeue_outq = NULL;
 
     conn->ref(conn, owner);
+    log_debug(LOG_VVERB, "get conn %p proxy", conn);
 
-    log_debug(LOG_VVERB, "get conn %p proxy %d", conn, conn->proxy);
+    return conn;
+}
+
+struct conn *
+conn_get_sentinel(void *owner, bool redis)
+{
+    struct conn *conn;
+
+    conn = _conn_get();
+    if (conn == NULL) {
+        return NULL;
+    }
+
+    conn->redis = redis ? 1 : 0;
+
+    conn->sentinel = 1;
+
+    conn->recv = msg_recv;
+    conn->recv_next = rsp_recv_next;
+    conn->recv_done = rsp_sentinel_recv_done;
+
+    conn->send = msg_send;
+    conn->send_next = req_send_next;
+    conn->send_done = req_send_done;
+
+    conn->close = sentinel_close;
+    conn->active = server_active;
+    conn->post_connect = sentinel_post_connect;
+    conn->swallow_msg = sentinel_swallow_msg;
+
+    conn->ref = server_ref;
+    conn->unref = server_unref;
+
+    conn->enqueue_inq = req_server_enqueue_imsgq;
+    conn->dequeue_inq = req_server_dequeue_imsgq;
+    conn->enqueue_outq = req_server_enqueue_omsgq;
+    conn->dequeue_outq = req_server_dequeue_omsgq;
+
+    conn->ref(conn, owner);
+    log_debug(LOG_VVERB, "get conn %p sentinel", conn);
 
     return conn;
 }

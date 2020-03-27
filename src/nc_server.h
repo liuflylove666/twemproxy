@@ -61,6 +61,20 @@
 
 typedef uint32_t (*hash_t)(const char *, size_t);
 
+typedef enum state_machine {
+    STATE_UNINITLIAZED,
+    STATE_WAITING_ADDR_RSP,
+    STATE_WAITING_ROLE_RSP,
+    STATE_WAITING_PSUB_RSP,
+    STATE_WAITING_RECV_PUB,
+} state_machine_t;
+
+#define MARK_MASTER     "master"
+#define MARK_PSUBSCB    "psubscribe"
+#define MARK_CHANNEL    "+switch-master"
+#define MARK_PMESSAGE   "pmessage"
+#define MARK_EVENT      MARK_CHANNEL
+
 struct continuum {
     uint32_t index;  /* server index */
     uint32_t value;  /* hash value */
@@ -70,18 +84,18 @@ struct server {
     uint32_t           idx;           /* server index */
     struct server_pool *owner;        /* owner pool */
 
-    struct string      pname;         /* hostname:port:weight (ref in conf_server) */
-    struct string      name;          /* hostname:port or [name] (ref in conf_server) */
-    struct string      addrstr;       /* hostname (ref in conf_server) */
+    struct string      pname;         /* hostname:port */
+    struct string      name;          /* hostname:port or [name]  | group */
+    struct string      addrstr;       /* hostname */
     uint16_t           port;          /* port */
-    uint32_t           weight;        /* weight */
+    uint32_t           weight;        /* weight(useless) */
     struct sockinfo    info;          /* server socket info */
 
     uint32_t           ns_conn_q;     /* # server connection */
     struct conn_tqh    s_conn_q;      /* server connection q */
 
-    int64_t            next_retry;    /* next retry time in usec */
-    uint32_t           failure_count; /* # consecutive failures */
+    struct msg         *timer;        /* timer */
+    unsigned           status:1;      /* ok? */
 };
 
 struct server_pool {
@@ -92,12 +106,17 @@ struct server_pool {
     uint32_t           nc_conn_q;            /* # client connection */
     struct conn_tqh    c_conn_q;             /* client connection q */
 
+    state_machine_t    state;                /* the state of the state machine */
+    struct array       groups;               /* group_name(ref in conf_pool) */
+    struct array       sentinels;            /* sentinel[] */
+    struct server      *sentinel;            /* sentinel */
+    uint32_t           sentinel_heartbeat;   /* sentinel heartbeat interval */
+
     struct array       server;               /* server[] */
     uint32_t           ncontinuum;           /* # continuum points */
     uint32_t           nserver_continuum;    /* # servers - live and dead on continuum (const) */
     struct continuum   *continuum;           /* continuum */
     uint32_t           nlive_server;         /* # live server */
-    int64_t            next_rebuild;         /* next distribution rebuild time in usec */
 
     struct string      name;                 /* pool name (ref in conf_pool) */
     struct string      addrstr;              /* pool address - hostname:port (ref in conf_pool) */
@@ -113,12 +132,8 @@ struct server_pool {
     int                redis_db;             /* redis database to connect to */
     uint32_t           client_connections;   /* maximum # client connection */
     uint32_t           server_connections;   /* maximum # server connection */
-    int64_t            server_retry_timeout; /* server retry timeout in usec */
-    uint32_t           server_failure_limit; /* server failure limit */
     struct string      redis_auth;           /* redis_auth password (matches requirepass on redis) */
     unsigned           require_auth;         /* require_auth? */
-    unsigned           auto_eject_hosts:1;   /* auto_eject_hosts? */
-    unsigned           preconnect:1;         /* preconnect? */
     unsigned           redis:1;              /* redis? */
     unsigned           tcpkeepalive:1;       /* tcpkeepalive? */
 };
@@ -133,12 +148,14 @@ struct conn *server_conn(struct server *server);
 rstatus_t server_connect(struct context *ctx, struct server *server, struct conn *conn);
 void server_close(struct context *ctx, struct conn *conn);
 void server_connected(struct context *ctx, struct conn *conn);
-void server_ok(struct context *ctx, struct conn *conn);
+rstatus_t server_reset(struct server *server, uint8_t *ip, uint8_t *port);
+void server_swallow_role_rsp(struct conn *conn, struct msg *msg);
 
 uint32_t server_pool_idx(struct server_pool *pool, uint8_t *key, uint32_t keylen);
 struct conn *server_pool_conn(struct context *ctx, struct server_pool *pool, uint8_t *key, uint32_t keylen);
 rstatus_t server_pool_run(struct server_pool *pool);
 rstatus_t server_pool_preconnect(struct context *ctx);
+rstatus_t server_pool_connect(struct context *ctx, struct server_pool *pool);
 void server_pool_disconnect(struct context *ctx);
 rstatus_t server_pool_init(struct array *server_pool, struct array *conf_pool, struct context *ctx);
 void server_pool_deinit(struct array *server_pool);

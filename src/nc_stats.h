@@ -33,6 +33,7 @@
 
 #define STATS_SERVER_CODEC(ACTION)                                                                                  \
     /* server behavior */                                                                                           \
+    ACTION( server_failover,        STATS_COUNTER,      "# failover of the group")                                  \
     ACTION( server_eof,             STATS_COUNTER,      "# eof on server connections")                              \
     ACTION( server_err,             STATS_COUNTER,      "# errors on server connections")                           \
     ACTION( server_timedout,        STATS_COUNTER,      "# timeouts on server connections")                         \

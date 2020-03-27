@@ -33,8 +33,6 @@
     RSP_STRING( DEFINE_ACTION )
 #undef DEFINE_ACTION
 
-static rstatus_t redis_handle_auth_req(struct msg *request, struct msg *response);
-
 /*
  * Return true, if the redis command take no key, otherwise
  * return false
@@ -45,6 +43,7 @@ redis_argz(struct msg *r)
     switch (r->type) {
     case MSG_REQ_REDIS_PING:
     case MSG_REQ_REDIS_QUIT:
+    case MSG_REQ_REDIS_TIME:
         return true;
 
     default:
@@ -85,10 +84,13 @@ redis_arg0(struct msg *r)
 
     case MSG_REQ_REDIS_SCARD:
     case MSG_REQ_REDIS_SMEMBERS:
+    case MSG_REQ_REDIS_SPOP:
 
     case MSG_REQ_REDIS_ZCARD:
     case MSG_REQ_REDIS_PFCOUNT:
     case MSG_REQ_REDIS_AUTH:
+    case MSG_REQ_REDIS_ECHO:
+    case MSG_REQ_REDIS_SELECT:
         return true;
 
     default:
@@ -234,7 +236,6 @@ redis_argn(struct msg *r)
     case MSG_REQ_REDIS_SUNIONSTORE:
     case MSG_REQ_REDIS_SRANDMEMBER:
     case MSG_REQ_REDIS_SSCAN:
-    case MSG_REQ_REDIS_SPOP:
 
     case MSG_REQ_REDIS_PFADD:
     case MSG_REQ_REDIS_PFMERGE:
@@ -678,6 +679,18 @@ redis_parse_req(struct msg *r)
                     break;
                 }
 
+                if (str4icmp(m, 'e', 'c', 'h', 'o')) {
+                    r->type = MSG_REQ_REDIS_ECHO;
+                    r->noforward = 1;
+                    break;
+                }
+
+                if (str4icmp(m, 't', 'i', 'm', 'e')) {
+                    r->type = MSG_REQ_REDIS_TIME;
+                    r->noforward = 1;
+                    break;
+                }
+
                 break;
 
             case 5:
@@ -876,6 +889,12 @@ redis_parse_req(struct msg *r)
 
                 if (str6icmp(m, 'z', 's', 'c', 'o', 'r', 'e')) {
                     r->type = MSG_REQ_REDIS_ZSCORE;
+                    break;
+                }
+
+                if (str6icmp(m, 's', 'e', 'l', 'e', 'c', 't')) {
+                    r->type = MSG_REQ_REDIS_SELECT;
+                    r->noforward = 1;
                     break;
                 }
 
@@ -2333,8 +2352,6 @@ redis_copy_bulk(struct msg *dst, struct msg *src)
             mbuf_remove(&src->mhdr, mbuf);
             if (dst != NULL) {
                 mbuf_insert(&dst->mhdr, mbuf);
-            } else {
-                mbuf_put(mbuf);
             }
             len -= mbuf_length(mbuf);
             mbuf = nbuf;
@@ -2677,6 +2694,106 @@ redis_fragment(struct msg *r, uint32_t ncontinuum, struct msg_tqh *frag_msgq)
     }
 }
 
+static rstatus_t
+redis_handle_auth_req(struct msg *req, struct msg *rsp)
+{
+    struct conn *conn = (struct conn *)rsp->owner;
+    struct server_pool *pool;
+    struct keypos *kpos;
+    uint8_t *key;
+    uint32_t keylen;
+    bool valid;
+
+    ASSERT(conn->client && !conn->proxy);
+
+    pool = (struct server_pool *)conn->owner;
+
+    if (!pool->require_auth) {
+        /*
+         * AUTH command from the client in absence of a redis_auth:
+         * directive should be treated as an error
+         */
+        return msg_append(rsp, rsp_no_password.data, rsp_no_password.len);
+    }
+
+    kpos = array_get(req->keys, 0);
+    key = kpos->start;
+    keylen = (uint32_t)(kpos->end - kpos->start);
+    valid = (keylen == pool->redis_auth.len) &&
+            (memcmp(pool->redis_auth.data, key, keylen) == 0) ? true : false;
+    if (valid) {
+        conn->authenticated = 1;
+        return msg_append(rsp, rsp_ok.data, rsp_ok.len);
+    }
+
+    /*
+     * Password in the AUTH command doesn't match the one configured in
+     * redis_auth: directive
+     *
+     * We mark the connection has unauthenticated until the client
+     * reauthenticates with the correct password
+     */
+    conn->authenticated = 0;
+    return msg_append(rsp, rsp_invalid_password.data, rsp_invalid_password.len);
+}
+
+static rstatus_t
+redis_handle_ping_req(struct msg *req, struct msg *rsp)
+{
+    return msg_append(rsp, rsp_pong.data, rsp_pong.len);
+}
+
+static rstatus_t
+redis_handle_echo_req(struct msg *req, struct msg *rsp)
+{
+    struct keypos *kpos;
+    uint8_t *key;
+    uint32_t len;
+
+    kpos = array_get(req->keys, 0);
+    key = kpos->start;
+    len = (uint32_t)(kpos->end - kpos->start);
+    key[len] = '\0';
+
+    return msg_prepend_format(rsp, "$%d\r\n%s\r\n", len, key);
+}
+
+static rstatus_t
+redis_handle_time_req(struct msg *req, struct msg *rsp)
+{
+    struct timeval tv;
+    char sec[16];
+    char usec[16];
+
+    gettimeofday(&tv, NULL);
+    nc_snprintf(sec, sizeof(sec)-1, "%ld", tv.tv_sec);
+    nc_snprintf(usec, sizeof(usec)-1, "%ld", tv.tv_usec);
+
+    return msg_prepend_format(rsp, "*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", 
+                              nc_strlen(sec), sec, nc_strlen(usec), usec);
+}
+
+static rstatus_t
+redis_handle_select_req(struct msg *req, struct msg *rsp)
+{
+    struct keypos *kpos;
+    uint8_t *key;
+    uint32_t keylen;
+
+    kpos = array_get(req->keys, 0);
+    key = kpos->start;
+    keylen = (uint32_t)(kpos->end - kpos->start);
+    if (keylen != 1) {
+        return NC_ERROR;
+    }
+
+    if (memcmp("0", key, keylen) != 0) {
+        return NC_ERROR;
+    }
+
+    return msg_append(rsp, rsp_ok.data, rsp_ok.len);
+}
+
 rstatus_t
 redis_reply(struct msg *r)
 {
@@ -2696,8 +2813,13 @@ redis_reply(struct msg *r)
 
     switch (r->type) {
     case MSG_REQ_REDIS_PING:
-        return msg_append(response, rsp_pong.data, rsp_pong.len);
-
+        return redis_handle_ping_req(r, response);
+	case MSG_REQ_REDIS_ECHO:
+        return redis_handle_echo_req(r, response);
+    case MSG_REQ_REDIS_TIME:
+        return redis_handle_time_req(r, response);
+    case MSG_REQ_REDIS_SELECT:
+        return redis_handle_select_req(r, response);
     default:
         NOT_REACHED();
         return NC_ERROR;
@@ -2795,60 +2917,19 @@ redis_post_coalesce(struct msg *r)
     }
 }
 
-static rstatus_t
-redis_handle_auth_req(struct msg *req, struct msg *rsp)
-{
-    struct conn *conn = (struct conn *)rsp->owner;
-    struct server_pool *pool;
-    struct keypos *kpos;
-    uint8_t *key;
-    uint32_t keylen;
-    bool valid;
-
-    ASSERT(conn->client && !conn->proxy);
-
-    pool = (struct server_pool *)conn->owner;
-
-    if (!pool->require_auth) {
-        /*
-         * AUTH command from the client in absence of a redis_auth:
-         * directive should be treated as an error
-         */
-        return msg_append(rsp, rsp_no_password.data, rsp_no_password.len);
-    }
-
-    kpos = array_get(req->keys, 0);
-    key = kpos->start;
-    keylen = (uint32_t)(kpos->end - kpos->start);
-    valid = (keylen == pool->redis_auth.len) &&
-            (memcmp(pool->redis_auth.data, key, keylen) == 0) ? true : false;
-    if (valid) {
-        conn->authenticated = 1;
-        return msg_append(rsp, rsp_ok.data, rsp_ok.len);
-    }
-
-    /*
-     * Password in the AUTH command doesn't match the one configured in
-     * redis_auth: directive
-     *
-     * We mark the connection has unauthenticated until the client
-     * reauthenticates with the correct password
-     */
-    conn->authenticated = 0;
-    return msg_append(rsp, rsp_invalid_password.data, rsp_invalid_password.len);
-}
-
 rstatus_t
 redis_add_auth(struct context *ctx, struct conn *c_conn, struct conn *s_conn)
 {
     rstatus_t status;
     struct msg *msg;
+    struct server *server;
     struct server_pool *pool;
 
     ASSERT(!s_conn->client && !s_conn->proxy);
     ASSERT(!conn_authenticated(s_conn));
 
-    pool = c_conn->owner;
+    server = s_conn->owner;
+    pool = server->owner;
 
     msg = msg_get(c_conn, true, c_conn->redis);
     if (msg == NULL) {
@@ -2863,9 +2944,44 @@ redis_add_auth(struct context *ctx, struct conn *c_conn, struct conn *s_conn)
         return status;
     }
 
+    msg->type = MSG_REQ_REDIS_AUTH;
     msg->swallow = 1;
     s_conn->enqueue_inq(ctx, s_conn, msg);
     s_conn->authenticated = 1;
+    log_debug(LOG_NOTICE, "sent 'AUTH %s' to %s | %s", 
+              pool->redis_auth.data, pool->name.data, server->pname.data);
+
+    return NC_OK;
+}
+
+rstatus_t
+redis_add_role(struct context *ctx, struct conn *conn)
+{
+    rstatus_t status;
+    struct msg *msg;
+    struct server *server;
+    struct server_pool *pool;
+
+    server = (struct server *)conn->owner;
+    pool = server->owner;
+
+    msg = msg_get(conn, true, conn->redis);
+    if (msg == NULL) {
+        conn->err = errno;
+        return NC_ENOMEM;
+    }
+
+    status = msg_prepend_format(msg, "*1\r\n$4\r\nROLE\r\n");
+    if (status != NC_OK) {
+        msg_put(msg);
+        return status;
+    }
+
+    msg->type = MSG_REQ_REDIS_ROLE;
+    msg->swallow = 1;
+    conn->enqueue_inq(ctx, conn, msg);
+    log_debug(LOG_NOTICE, "sent 'ROLE' req to %s | %s", 
+        pool->name.data, server->pname.data);
 
     return NC_OK;
 }
@@ -2879,7 +2995,6 @@ redis_post_connect(struct context *ctx, struct conn *conn, struct server *server
     int digits;
 
     ASSERT(!conn->client && conn->connected);
-    ASSERT(conn->redis);
 
     /*
      * By default, every connection to redis uses the database DB 0. You
@@ -2923,28 +3038,33 @@ redis_post_connect(struct context *ctx, struct conn *conn, struct server *server
 void
 redis_swallow_msg(struct conn *conn, struct msg *pmsg, struct msg *msg)
 {
+    struct server *server;
+    struct server_pool *pool;
+    struct mbuf *mbuf;
+
+    server = conn->owner;
+    pool = server->owner;
+    mbuf = STAILQ_FIRST(&msg->mhdr);
+
     if (pmsg != NULL && pmsg->type == MSG_REQ_REDIS_SELECT &&
         msg != NULL && redis_error(msg)) {
-        struct server* conn_server;
-        struct server_pool* conn_pool;
-        struct mbuf* rsp_buffer;
-        uint8_t message[128];
-        size_t copy_len;
+        log_warn("SELECT %d failed on %s | %s: %.*s",
+                 pool->redis_db, pool->name.data, server->name.data, 
+                 mbuf->last-mbuf->start, mbuf->start);
+    } else if (pmsg != NULL && pmsg->type == MSG_REQ_REDIS_AUTH && 
+               msg != NULL && msg->type == MSG_RSP_REDIS_ERROR) {
+        log_warn("AUTH failed on %s | %s: %.*s", 
+                 pool->name.data, server->pname.data, 
+                 mbuf->last-mbuf->start, mbuf->start);
+    } else if (pmsg != NULL && pmsg->type == MSG_REQ_REDIS_ROLE) {
+        if (msg != NULL && msg->type == MSG_RSP_REDIS_ERROR) {
+            log_warn("ROLE failed on %s | %s: %.*s", 
+                      pool->name.data, server->pname.data, 
+                      mbuf->last-mbuf->start, mbuf->start);
+            return;
+        }
 
-        /*
-         * Get a substring from the message so that the initial - and the trailing
-         * \r\n is removed.
-         */
-        conn_server = (struct server*)conn->owner;
-        conn_pool = conn_server->owner;
-        rsp_buffer = STAILQ_LAST(&msg->mhdr, mbuf, next);
-        copy_len = MIN(mbuf_length(rsp_buffer) - 3, sizeof(message) - 1);
-
-        nc_memcpy(message, &rsp_buffer->start[1], copy_len);
-        message[copy_len] = 0;
-
-        log_warn("SELECT %d failed on %s | %s: %s",
-                 conn_pool->redis_db, conn_pool->name.data,
-                 conn_server->name.data, message);
+        server_swallow_role_rsp(conn, msg);
+        return;
     }
 }

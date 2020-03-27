@@ -241,9 +241,6 @@ rsp_forward(struct context *ctx, struct conn *s_conn, struct msg *msg)
     ASSERT(!s_conn->client && !s_conn->proxy);
     msgsize = msg->mlen;
 
-    /* response from server implies that server is ok and heartbeating */
-    server_ok(ctx, s_conn);
-
     /* dequeue peer message (request) from server */
     pmsg = TAILQ_FIRST(&s_conn->omsg_q);
     ASSERT(pmsg != NULL && pmsg->peer == NULL);

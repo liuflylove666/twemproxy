@@ -190,6 +190,21 @@ msg_tmo_delete(struct msg *msg)
     log_debug(LOG_VERB, "delete msg %"PRIu64" from tmo rbt", msg->id);
 }
 
+void
+msg_timer(struct msg *msg, int64_t timeout, void *data)
+{
+    struct rbnode *node;
+
+    node = &msg->tmo_rbe;
+    node->key = nc_msec_now() + timeout;
+    node->data = data;
+
+    rbtree_insert(&tmo_rbt, node);
+
+    log_debug(LOG_VERB, "insert msg %"PRIu64" into tmo rbt with expiry of "
+              "%d msec", msg->id, timeout);
+}
+
 static struct msg *
 _msg_get(void)
 {
@@ -268,7 +283,21 @@ done:
     msg->done = 0;
     msg->fdone = 0;
     msg->swallow = 0;
-    msg->redis = 0;
+
+    return msg;
+}
+
+struct msg *
+msg_get_raw(void *owner)
+{
+    struct msg *msg;
+
+    msg = _msg_get();
+    if (msg == NULL) return NULL;
+    msg->owner = owner;
+
+    log_debug(LOG_VVERB, "get msg %p id %"PRIu64" owner %p",
+              msg, msg->id, msg->owner);
 
     return msg;
 }
@@ -287,19 +316,31 @@ msg_get(struct conn *conn, bool request, bool redis)
     msg->request = request ? 1 : 0;
     msg->redis = redis ? 1 : 0;
 
+    log_debug(LOG_NOTICE, "msg_get  redis:%d", redis);
     if (redis) {
-        if (request) {
-            msg->parser = redis_parse_req;
+        log_debug(LOG_NOTICE, "if msg_get  redis:%d", redis);
+        if (conn->sentinel) {
+            if (request) {
+                msg->parser = sentinel_parse_req;
+                msg->swallow = 1;
+            } else {
+                msg->parser = sentinel_parse_rsp;
+            }
         } else {
-            msg->parser = redis_parse_rsp;
+            if (request) {
+                msg->parser = redis_parse_req;
+            } else {
+                msg->parser = redis_parse_rsp;
+            }
+            msg->add_auth = redis_add_auth;
+            msg->fragment = redis_fragment;
+            msg->reply = redis_reply;
+            msg->failure = redis_failure;
+            msg->pre_coalesce = redis_pre_coalesce;
+            msg->post_coalesce = redis_post_coalesce;
         }
-        msg->add_auth = redis_add_auth;
-        msg->fragment = redis_fragment;
-        msg->reply = redis_reply;
-        msg->failure = redis_failure;
-        msg->pre_coalesce = redis_pre_coalesce;
-        msg->post_coalesce = redis_post_coalesce;
-    } else {
+
+    }  else {
         if (request) {
             msg->parser = memcache_parse_req;
         } else {
@@ -322,6 +363,7 @@ msg_get(struct conn *conn, bool request, bool redis)
     return msg;
 }
 
+
 struct msg *
 msg_get_error(bool redis, err_t err)
 {
@@ -337,7 +379,7 @@ msg_get_error(bool redis, err_t err)
     }
 
     msg->state = 0;
-    msg->type = MSG_RSP_MC_SERVER_ERROR;
+    msg->type = MSG_UNKNOWN;
 
     mbuf = mbuf_get();
     if (mbuf == NULL) {

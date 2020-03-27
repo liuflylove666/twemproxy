@@ -34,7 +34,8 @@
 
 #define CONF_DEFAULT_ARGS       3
 #define CONF_DEFAULT_POOL       8
-#define CONF_DEFAULT_SERVERS    8
+#define CONF_DEFAULT_GROUPS     8
+#define CONF_DEFAULT_SENTINELS  3
 
 #define CONF_UNSET_NUM  -1
 #define CONF_UNSET_PTR  NULL
@@ -48,13 +49,12 @@
 #define CONF_DEFAULT_CLIENT_CONNECTIONS      0
 #define CONF_DEFAULT_REDIS                   false
 #define CONF_DEFAULT_REDIS_DB                0
-#define CONF_DEFAULT_PRECONNECT              false
-#define CONF_DEFAULT_AUTO_EJECT_HOSTS        false
 #define CONF_DEFAULT_SERVER_RETRY_TIMEOUT    30 * 1000      /* in msec */
 #define CONF_DEFAULT_SERVER_FAILURE_LIMIT    2
 #define CONF_DEFAULT_SERVER_CONNECTIONS      1
 #define CONF_DEFAULT_KETAMA_PORT             11211
 #define CONF_DEFAULT_TCPKEEPALIVE            false
+#define CONF_DEFAULT_SENTINEL_HEARTBEAT      1000           /* in msec */
 
 struct conf_listen {
     struct string   pname;   /* listen: as "hostname:port" */
@@ -66,11 +66,10 @@ struct conf_listen {
 };
 
 struct conf_server {
-    struct string   pname;      /* server: as "hostname:port:weight" */
+    struct string   pname;      /* server: as "hostname:port" */
     struct string   name;       /* hostname:port or [name] */
     struct string   addrstr;    /* hostname */
     int             port;       /* port */
-    int             weight;     /* weight */
     struct sockinfo info;       /* connect socket info */
     unsigned        valid:1;    /* valid? */
 };
@@ -88,12 +87,10 @@ struct conf_pool {
     int                redis;                 /* redis: */
     struct string      redis_auth;            /* redis_auth: redis auth password (matches requirepass on redis) */
     int                redis_db;              /* redis_db: redis db */
-    int                preconnect;            /* preconnect: */
-    int                auto_eject_hosts;      /* auto_eject_hosts: */
     int                server_connections;    /* server_connections: */
-    int                server_retry_timeout;  /* server_retry_timeout: in msec */
-    int                server_failure_limit;  /* server_failure_limit: */
-    struct array       server;                /* servers: conf_server[] */
+    struct array       groups;                /* groups: string[] */
+    int                sentinel_heartbeat;    /* sentinel heartbeat: in msec */
+    struct array       sentinels;             /* sentinels: conf_server[] */
     unsigned           valid:1;               /* valid? */
 };
 
@@ -125,7 +122,8 @@ struct command {
 
 char *conf_set_string(struct conf *cf, struct command *cmd, void *conf);
 char *conf_set_listen(struct conf *cf, struct command *cmd, void *conf);
-char *conf_add_server(struct conf *cf, struct command *cmd, void *conf);
+char *conf_add_group(struct conf *cf, struct command *cmd, void *conf);
+char *conf_add_sentinel(struct conf *cf, struct command *cmd, void *conf);
 char *conf_set_num(struct conf *cf, struct command *cmd, void *conf);
 char *conf_set_bool(struct conf *cf, struct command *cmd, void *conf);
 char *conf_set_hash(struct conf *cf, struct command *cmd, void *conf);
@@ -133,6 +131,7 @@ char *conf_set_distribution(struct conf *cf, struct command *cmd, void *conf);
 char *conf_set_hashtag(struct conf *cf, struct command *cmd, void *conf);
 
 rstatus_t conf_server_each_transform(void *elem, void *data);
+rstatus_t conf_sentinel_each_transform(void *elem, void *data);
 rstatus_t conf_pool_each_transform(void *elem, void *data);
 
 struct conf *conf_create(char *filename);

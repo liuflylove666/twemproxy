@@ -129,7 +129,7 @@ log_loggable(int level)
 }
 
 void
-_log(const char *file, int line, int panic, const char *fmt, ...)
+_log(int level, const char *file, int line, int panic, const char *fmt, ...)
 {
     struct logger *l = &logger;
     int len, size, errno_save;
@@ -150,7 +150,7 @@ _log(const char *file, int line, int panic, const char *fmt, ...)
     buf[len++] = '[';
     len += nc_strftime(buf + len, size - len, "%Y-%m-%d %H:%M:%S.", localtime(&tv.tv_sec));
     len += nc_scnprintf(buf + len, size - len, "%03ld", tv.tv_usec/1000);
-    len += nc_scnprintf(buf + len, size - len, "] %s:%d ", file, line);
+    len += nc_scnprintf(buf + len, size - len, "] [%02d] %s:%d ", level, file, line);
 
     va_start(args, fmt);
     len += nc_vscnprintf(buf + len, size - len, fmt, args);

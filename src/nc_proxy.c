@@ -210,11 +210,9 @@ proxy_each_init(void *elem, void *data)
         return status;
     }
 
-    log_debug(LOG_NOTICE, "p %d listening on '%.*s' in %s pool %"PRIu32" '%.*s'"
-              " with %"PRIu32" servers", p->sd, pool->addrstr.len,
-              pool->addrstr.data, pool->redis ? "redis" : "memcache",
-              pool->idx, pool->name.len, pool->name.data,
-              array_n(&pool->server));
+    log_debug(LOG_NOTICE, "p %d listening on '%.*s' in pool %"PRIu32" '%.*s'"
+              " with %"PRIu32" servers", p->sd, pool->addrstr.len, pool->addrstr.data, 
+              pool->idx, pool->name.len, pool->name.data, array_n(&pool->server));
 
     return NC_OK;
 }
@@ -324,6 +322,17 @@ proxy_accept(struct context *ctx, struct conn *p)
         }
 
         break;
+    }
+
+    /* REJECT1: reject 'accept' while pool is not ready */
+    if (pool->state != STATE_WAITING_RECV_PUB) {
+        log_warn("reject accept! pool '%.*s' is not ready, state %d", 
+                 pool->name.len, pool->name.data, pool->state);
+        status = close(sd);
+        if (status < 0) {
+            log_error("close c %d failed, ignored: %s", sd, strerror(errno));
+        }
+        return NC_OK;
     }
 
     if (conn_ncurr_cconn() >= ctx->max_ncconn) {
