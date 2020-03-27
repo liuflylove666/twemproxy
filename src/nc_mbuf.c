@@ -119,6 +119,7 @@ void
 mbuf_put(struct mbuf *mbuf)
 {
     log_debug(LOG_VVERB, "put mbuf %p len %d", mbuf, mbuf->last - mbuf->pos);
+
     if (nfree_mbufq >= MBUF_RESERVED) {
         mbuf_free(mbuf);
         return;

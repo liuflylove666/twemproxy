@@ -190,6 +190,21 @@ msg_tmo_delete(struct msg *msg)
     log_debug(LOG_VERB, "delete msg %"PRIu64" from tmo rbt", msg->id);
 }
 
+void
+msg_timer(struct msg *msg, int64_t timeout, void *data)
+{
+    struct rbnode *node;
+
+    node = &msg->tmo_rbe;
+    node->key = nc_msec_now() + timeout;
+    node->data = data;
+
+    rbtree_insert(&tmo_rbt, node);
+
+    log_debug(LOG_VERB, "insert msg %"PRIu64" into tmo rbt with expiry of "
+              "%d msec", msg->id, timeout);
+}
+
 static struct msg *
 _msg_get(void)
 {
@@ -275,7 +290,23 @@ done:
 }
 
 struct msg *
-msg_get(struct conn *conn, bool request, bool redis)
+msg_get_raw(void *owner)
+{
+    struct msg *msg;
+
+    msg = _msg_get();
+    if (msg == NULL) return NULL;
+    msg->owner = owner;
+
+    log_debug(LOG_VVERB, "get msg %p id %"PRIu64" owner %p",
+              msg, msg->id, msg->owner);
+
+    return msg;
+}
+
+
+struct msg *
+msg_get(struct conn *conn, bool request)
 {
     struct msg *msg;
 
@@ -286,9 +317,15 @@ msg_get(struct conn *conn, bool request, bool redis)
 
     msg->owner = conn;
     msg->request = request ? 1 : 0;
-    msg->redis = redis ? 1 : 0;
 
-    if (redis) {
+    if (conn->sentinel) {
+        if (request) {
+            msg->parser = sentinel_parse_req;
+            msg->swallow = 1;
+        } else {
+            msg->parser = sentinel_parse_rsp;
+        }
+    } else {
         if (request) {
             msg->parser = redis_parse_req;
         } else {
@@ -300,20 +337,11 @@ msg_get(struct conn *conn, bool request, bool redis)
         msg->failure = redis_failure;
         msg->pre_coalesce = redis_pre_coalesce;
         msg->post_coalesce = redis_post_coalesce;
-    } else {
-        if (request) {
-            msg->parser = memcache_parse_req;
-        } else {
-            msg->parser = memcache_parse_rsp;
-        }
-        msg->add_auth = memcache_add_auth;
-        msg->fragment = memcache_fragment;
-        msg->failure = memcache_failure;
-        msg->pre_coalesce = memcache_pre_coalesce;
-        msg->post_coalesce = memcache_post_coalesce;
     }
 
-    msg->start_ts = nc_usec_now();
+    if (log_loggable(LOG_NOTICE) != 0) {
+        msg->start_ts = nc_usec_now();
+    }
 
     log_debug(LOG_VVERB, "get msg %p id %"PRIu64" request %d owner sd %d",
               msg, msg->id, msg->request, conn->sd);
@@ -336,7 +364,7 @@ msg_get_error(bool redis, err_t err)
     }
 
     msg->state = 0;
-    msg->type = MSG_RSP_MC_SERVER_ERROR;
+    msg->type = MSG_UNKNOWN;
 
     mbuf = mbuf_get();
     if (mbuf == NULL) {
@@ -344,11 +372,8 @@ msg_get_error(bool redis, err_t err)
         return NULL;
     }
     mbuf_insert(&msg->mhdr, mbuf);
-    if (redis && err < 0) {
-        n = nc_scnprintf(mbuf->last, mbuf_size(mbuf), "%s"CRLF, redis_failure_msg(err));
-    } else {
-        n = nc_scnprintf(mbuf->last, mbuf_size(mbuf), "%s %s"CRLF, protstr, errstr);
-    }
+
+    n = nc_scnprintf(mbuf->last, mbuf_size(mbuf), "%s %s"CRLF, protstr, errstr);
     mbuf->last += n;
     msg->mlen = (uint32_t)n;
 
@@ -594,7 +619,7 @@ msg_parsed(struct context *ctx, struct conn *conn, struct msg *msg)
         return NC_ENOMEM;
     }
 
-    nmsg = msg_get(msg->owner, msg->request, conn->redis);
+    nmsg = msg_get(msg->owner, msg->request);
     if (nmsg == NULL) {
         mbuf_put(nbuf);
         return NC_ENOMEM;

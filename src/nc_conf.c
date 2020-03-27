@@ -15,18 +15,21 @@
  * limitations under the License.
  */
 
+
 #include <unistd.h>
 #include <grp.h>
 #include <pwd.h>
 #include <nc_core.h>
 #include <nc_conf.h>
 #include <nc_server.h>
+#include <nc_sentinel.h>
 #include <proto/nc_proto.h>
 
 #define MAX_SECTION_NAME_N 33
 
 static rstatus_t conf_parse_pools_section(struct conf *cf, void *data);
 static rstatus_t conf_parse_global_section(struct conf *cf);
+
 
 #define DEFINE_ACTION(_hash, _name) string(#_name),
 static struct string hash_strings[] = {
@@ -94,32 +97,42 @@ static struct command conf_pool_commands[] = {
       conf_set_num,
       offsetof(struct conf_pool, redis_db) },
 
-    { string("preconnect"),
-      conf_set_bool,
-      offsetof(struct conf_pool, preconnect) },
+    // { string("preconnect"),
+    //   conf_set_bool,
+    //   offsetof(struct conf_pool, preconnect) },
 
-    { string("auto_eject_hosts"),
-      conf_set_bool,
-      offsetof(struct conf_pool, auto_eject_hosts) },
+    // { string("auto_eject_hosts"),
+    //   conf_set_bool,
+    //   offsetof(struct conf_pool, auto_eject_hosts) },
+
 
     { string("server_connections"),
       conf_set_num,
       offsetof(struct conf_pool, server_connections) },
 
-    { string("server_retry_timeout"),
-      conf_set_num,
-      offsetof(struct conf_pool, server_retry_timeout) },
+    // { string("server_retry_timeout"),
+    //   conf_set_num,
+    //   offsetof(struct conf_pool, server_retry_timeout) },
 
-    { string("server_failure_limit"),
-      conf_set_num,
-      offsetof(struct conf_pool, server_failure_limit) },
+    // { string("server_failure_limit"),
+    //   conf_set_num,
+    //   offsetof(struct conf_pool, server_failure_limit) },
 
-    { string("servers"),
-      conf_add_server,
-      offsetof(struct conf_pool, server) },
+    { string("groups"),
+      conf_add_group,
+      offsetof(struct conf_pool, groups) },
+
+    { string("sentinel_heartbeat"),
+      conf_set_num,
+      offsetof(struct conf_pool, sentinel_heartbeat) },
+
+    { string("sentinels"),
+      conf_add_sentinel,
+      offsetof(struct conf_pool, sentinels) },
 
     null_command
 };
+
 
 static struct command conf_global_commands[] = {
     {
@@ -162,7 +175,7 @@ conf_server_init(struct conf_server *cs)
     string_init(&cs->name);
     string_init(&cs->addrstr);
     cs->port = 0;
-    cs->weight = 0;
+    // cs->weight = 0;
 
     memset(&cs->info, 0, sizeof(cs->info));
 
@@ -184,6 +197,36 @@ conf_server_deinit(struct conf_server *cs)
 rstatus_t
 conf_server_each_transform(void *elem, void *data)
 {
+    struct string *group = elem;
+    struct array *server = data;
+    struct server *s;
+
+    s = array_push(server);
+    ASSERT(s != NULL);
+
+    s->idx = array_idx(server, s);
+    s->owner = NULL;
+
+    string_init(&s->pname);
+    s->name = *group;/* ref */
+    string_init(&s->addrstr);
+    s->port = 0;
+    s->weight = 1;
+    memset(&s->info, 0, sizeof(s->info));
+    s->ns_conn_q = 0;
+    TAILQ_INIT(&s->s_conn_q);
+    s->timer = NULL;
+    s->status = 0; 
+
+    log_debug(LOG_VERB, "transform to server %"PRIu32" '%.*s'",
+              s->idx, group->len, group->data);
+
+    return NC_OK;
+}
+
+rstatus_t
+conf_sentinel_each_transform(void *elem, void *data)
+{
     struct conf_server *cs = elem;
     struct array *server = data;
     struct server *s;
@@ -200,17 +243,20 @@ conf_server_each_transform(void *elem, void *data)
     s->name = cs->name;
     s->addrstr = cs->addrstr;
     s->port = (uint16_t)cs->port;
-    s->weight = (uint32_t)cs->weight;
+    s->weight = 1;
 
     nc_memcpy(&s->info, &cs->info, sizeof(cs->info));
 
     s->ns_conn_q = 0;
     TAILQ_INIT(&s->s_conn_q);
 
-    s->next_retry = 0LL;
-    s->failure_count = 0;
+    s->timer = msg_get_raw(server);
+    if (s->timer == NULL) {
+        return NC_ERROR;
+    }
+    s->status = 0;
 
-    log_debug(LOG_VERB, "transform to server %"PRIu32" '%.*s'",
+    log_debug(LOG_VERB, "transform to sentinel %"PRIu32" '%.*s'",
               s->idx, s->pname.len, s->pname.data);
 
     return NC_OK;
@@ -242,13 +288,13 @@ conf_pool_init(struct conf_pool *cp, struct string *name)
     cp->redis = CONF_UNSET_NUM;
     cp->tcpkeepalive = CONF_UNSET_NUM;
     cp->redis_db = CONF_UNSET_NUM;
-    cp->preconnect = CONF_UNSET_NUM;
-    cp->auto_eject_hosts = CONF_UNSET_NUM;
     cp->server_connections = CONF_UNSET_NUM;
-    cp->server_retry_timeout = CONF_UNSET_NUM;
-    cp->server_failure_limit = CONF_UNSET_NUM;
 
-    array_null(&cp->server);
+    array_null(&cp->groups);
+
+    cp->sentinel_heartbeat = CONF_UNSET_NUM;
+
+    array_null(&cp->sentinels);
 
     cp->valid = 0;
 
@@ -257,15 +303,17 @@ conf_pool_init(struct conf_pool *cp, struct string *name)
         return status;
     }
 
-    status = array_init(&cp->server, CONF_DEFAULT_SERVERS,
-                        sizeof(struct conf_server));
+    status = array_init(&cp->groups, CONF_DEFAULT_GROUPS,
+                        sizeof(struct string));
     if (status != NC_OK) {
         string_deinit(&cp->name);
         return status;
     }
-    status = array_init(&cp->redis_master, 1, sizeof(struct conf_server));
+
+    status = array_init(&cp->sentinels, CONF_DEFAULT_SENTINELS,
+                        sizeof(struct conf_server));
     if (status != NC_OK) {
-        array_deinit(&cp->redis_master);
+        array_deinit(&cp->groups);
         string_deinit(&cp->name);
         return status;
     }
@@ -287,10 +335,15 @@ conf_pool_deinit(struct conf_pool *cp)
         string_deinit(&cp->redis_auth);
     }
 
-    while (array_n(&cp->server) != 0) {
-        conf_server_deinit(array_pop(&cp->server));
+    while (array_n(&cp->groups) != 0) {
+        string_deinit(array_pop(&cp->groups));
     }
-    array_deinit(&cp->server);
+    array_deinit(&cp->groups);
+
+    while (array_n(&cp->sentinels) != 0) {
+        conf_server_deinit(array_pop(&cp->sentinels));
+    }
+    array_deinit(&cp->sentinels);
 
     log_debug(LOG_VVERB, "deinit conf pool %p", cp);
 }
@@ -299,11 +352,9 @@ rstatus_t
 conf_pool_each_transform(void *elem, void *data)
 {
     rstatus_t status;
-    uint32_t i;
     struct conf_pool *cp = elem;
     struct array *server_pool = data;
     struct server_pool *sp;
-    struct server *s;
 
     ASSERT(cp->valid);
 
@@ -317,13 +368,17 @@ conf_pool_each_transform(void *elem, void *data)
     sp->nc_conn_q = 0;
     TAILQ_INIT(&sp->c_conn_q);
 
+    sp->state = STATE_UNINITLIAZED;
+    array_null(&sp->groups);
+    array_null(&sp->sentinels);
+    sp->sentinel = NULL;
+    sp->sentinel_heartbeat = (uint32_t)cp->sentinel_heartbeat;
+
     array_null(&sp->server);
-    array_null(&sp->redis_master);
     sp->ncontinuum = 0;
     sp->nserver_continuum = 0;
     sp->continuum = NULL;
     sp->nlive_server = 0;
-    sp->next_rebuild = 0LL;
 
     sp->name = cp->name;
     sp->addrstr = cp->listen.pname;
@@ -340,6 +395,7 @@ conf_pool_each_transform(void *elem, void *data)
     sp->tcpkeepalive = cp->tcpkeepalive ? 1 : 0;
 
     sp->redis = cp->redis ? 1 : 0;
+
     sp->timeout = cp->timeout;
     sp->backlog = cp->backlog;
     sp->redis_db = cp->redis_db;
@@ -349,25 +405,17 @@ conf_pool_each_transform(void *elem, void *data)
 
     sp->client_connections = (uint32_t)cp->client_connections;
     sp->server_connections = (uint32_t)cp->server_connections;
-    sp->server_retry_timeout = (int64_t)cp->server_retry_timeout * 1000LL;
-    sp->server_failure_limit = (uint32_t)cp->server_failure_limit;
-    sp->auto_eject_hosts = cp->auto_eject_hosts ? 1 : 0;
-    sp->preconnect = cp->preconnect ? 1 : 0;
 
-    status = server_init(&sp->server, &cp->server, sp);
+
+    sp->groups = cp->groups;
+    status = server_init(&sp->server, &sp->groups, sp);
     if (status != NC_OK) {
         return status;
     }
-    if (array_n(&cp->redis_master) > 0) {
-        status = server_init(&sp->redis_master, &cp->redis_master, sp);
-        if (status != NC_OK) {
-            return status;
-        }
-        //append redis master metrics to server metrics array
-        for (i = 0; i < array_n(&sp->redis_master); i++) {
-            s = array_get(&sp->redis_master, i);
-            s->idx += array_n(&sp->server);
-        }
+
+    status = sentinel_init(&sp->sentinels, &cp->sentinels, sp);
+    if (status != NC_OK) {
+        return status;
     }
 
     log_debug(LOG_VERB, "transform to pool %"PRIu32" '%.*s'", sp->idx,
@@ -403,23 +451,29 @@ conf_dump(struct conf *cf)
         log_debug(LOG_VVERB, "  hash_tag: \"%.*s\"", cp->hash_tag.len,
                   cp->hash_tag.data);
         log_debug(LOG_VVERB, "  distribution: %d", cp->distribution);
+        log_debug(LOG_VVERB, "  redis: %d", cp->redis);
         log_debug(LOG_VVERB, "  client_connections: %d",
                   cp->client_connections);
-        log_debug(LOG_VVERB, "  redis: %d", cp->redis);
-        log_debug(LOG_VVERB, "  preconnect: %d", cp->preconnect);
-        log_debug(LOG_VVERB, "  auto_eject_hosts: %d", cp->auto_eject_hosts);
+        log_debug(LOG_VVERB, "  tcpkeepalive: %d", cp->tcpkeepalive);
+        log_debug(LOG_VVERB, "  redis_auth: \"%.*s\"", cp->redis_auth.len,
+                  cp->redis_auth.data);
+        log_debug(LOG_VVERB, "  redis_db: %d", cp->redis_db);
         log_debug(LOG_VVERB, "  server_connections: %d",
                   cp->server_connections);
-        log_debug(LOG_VVERB, "  server_retry_timeout: %d",
-                  cp->server_retry_timeout);
-        log_debug(LOG_VVERB, "  server_failure_limit: %d",
-                  cp->server_failure_limit);
 
-        nserver = array_n(&cp->server);
-        log_debug(LOG_VVERB, "  servers: %"PRIu32"", nserver);
-
+        nserver = array_n(&cp->groups);
+        log_debug(LOG_VVERB, "  groups: %"PRIu32"", nserver);
         for (j = 0; j < nserver; j++) {
-            s = array_get(&cp->server, j);
+            s = array_get(&cp->groups, j);
+            log_debug(LOG_VVERB, "    %.*s", s->len, s->data);
+        }
+
+        log_debug(LOG_VVERB, "  sentinel_heartbeat: %d", cp->sentinel_heartbeat);
+
+        nserver = array_n(&cp->sentinels);
+        log_debug(LOG_VVERB, "  sentinels: %"PRIu32"", nserver);
+        for (j = 0; j < nserver; j++) {
+            s = array_get(&cp->sentinels, j);
             log_debug(LOG_VVERB, "    %.*s", s->len, s->data);
         }
     }
@@ -904,6 +958,7 @@ conf_parse(struct conf *cf)
     struct passwd *pw;
     struct group *grp;
 
+
     ASSERT(cf->sound && !cf->parsed);
     ASSERT(array_n(&cf->arg) == 0);
 
@@ -1197,26 +1252,24 @@ conf_validate_structure(struct conf *cf)
     /*
      * Validate that the configuration conforms roughly to the following
      * yaml tree structure:
-     * global:
-     *   key1: value1
-     * pools:
-     *   keyx:
-     *     key1: value1
-     *     key2: value2
-     *     seq:
-     *       - elem1
-     *       - elem2
-     *       - elem3
-     *     key3: value3
      *
-     *   keyy:
-     *     key1: value1
-     *     key2: value2
-     *     seq:
-     *       - elem1
-     *       - elem2
-     *       - elem3
-     *     key3: value3
+     * keyx:
+     *   key1: value1
+     *   key2: value2
+     *   seq:
+     *     - elem1
+     *     - elem2
+     *     - elem3
+     *   key3: value3
+     *
+     * keyy:
+     *   key1: value1
+     *   key2: value2
+     *   seq:
+     *     - elem1
+     *     - elem2
+     *     - elem3
+     *   key3: value3
      */
     do {
         status = conf_event_next(cf);
@@ -1274,8 +1327,8 @@ conf_validate_structure(struct conf *cf)
 
         case YAML_SEQUENCE_START_EVENT:
             if (seq) {
-                error = true;
-                log_error("conf: '%s' has more than one sequence directive",
+                /*error = true;*/
+                log_warn("conf: '%s' has more than one sequence directive",
                           cf->fname);
             } else if (depth != CONF_POOL_MAX_DEPTH) {
                 error = true;
@@ -1363,7 +1416,15 @@ conf_pre_validate(struct conf *cf)
 }
 
 static int
-conf_server_name_cmp(const void *t1, const void *t2)
+conf_group_name_cmp(const void *t1, const void *t2)
+{
+    const struct string *g1 = t1, *g2 = t2;
+
+    return string_compare(g1, g2);
+}
+
+static int
+conf_sentinel_name_cmp(const void *t1, const void *t2)
 {
     const struct conf_server *s1 = t1, *s2 = t2;
 
@@ -1386,34 +1447,68 @@ conf_pool_listen_cmp(const void *t1, const void *t2)
     return string_compare(&p1->listen.pname, &p2->listen.pname);
 }
 
+static int
+conf_validate_group(struct conf *cf, struct conf_pool *cp)
+{
+    uint32_t i, n;
+    bool valid;
+
+    n = array_n(&cp->groups);
+    if (n == 0) {
+        log_error("conf: pool '%.*s' has no groups", cp->name.len,
+                  cp->name.data);
+        return NC_ERROR;
+    }
+
+    array_sort(&cp->groups, conf_group_name_cmp);
+    for (valid = true, i = 0; i < n -1; i++) {
+        struct string *s1, *s2;
+
+        s1 = array_get(&cp->groups, i);
+        s2 = array_get(&cp->groups, i + 1);
+
+        if (string_compare(s1, s2) == 0) {
+            log_error("conf: pool '%.*s' has group with same name '%.*s'",
+                      cp->name.len, cp->name.data, s1->len, s1->data);
+            valid = false;
+            break;
+        }
+    }
+    if (!valid) {
+        return NC_ERROR;
+    }
+
+    return NC_OK;
+}
+
 static rstatus_t
-conf_validate_server(struct conf *cf, struct conf_pool *cp)
+conf_validate_sentinel(struct conf *cf, struct conf_pool *cp)
 {
     uint32_t i, nserver;
     bool valid;
 
-    nserver = array_n(&cp->server);
+    nserver = array_n(&cp->sentinels);
     if (nserver == 0) {
-        log_error("conf: pool '%.*s' has no servers", cp->name.len,
+        log_error("conf: pool '%.*s' has no sentinels", cp->name.len,
                   cp->name.data);
         return NC_ERROR;
     }
 
     /*
-     * Disallow duplicate servers - servers with identical "host:port:weight"
-     * or "name" combination are considered as duplicates. When server name
+     * Disallow duplicate sentinels - sentinels with identical "host:port:weight"
+     * or "name" combination are considered as duplicates. When sentinel name
      * is configured, we only check for duplicate "name" and not for duplicate
      * "host:port:weight"
      */
-    array_sort(&cp->server, conf_server_name_cmp);
+    array_sort(&cp->sentinels, conf_sentinel_name_cmp);
     for (valid = true, i = 0; i < nserver - 1; i++) {
         struct conf_server *cs1, *cs2;
 
-        cs1 = array_get(&cp->server, i);
-        cs2 = array_get(&cp->server, i + 1);
+        cs1 = array_get(&cp->sentinels, i);
+        cs2 = array_get(&cp->sentinels, i + 1);
 
         if (string_compare(&cs1->name, &cs2->name) == 0) {
-            log_error("conf: pool '%.*s' has servers with same name '%.*s'",
+            log_error("conf: pool '%.*s' has sentinel with same name '%.*s'",
                       cp->name.len, cp->name.data, cs1->name.len,
                       cs1->name.data);
             valid = false;
@@ -1477,14 +1572,6 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
         cp->redis_db = CONF_DEFAULT_REDIS_DB;
     }
 
-    if (cp->preconnect == CONF_UNSET_NUM) {
-        cp->preconnect = CONF_DEFAULT_PRECONNECT;
-    }
-
-    if (cp->auto_eject_hosts == CONF_UNSET_NUM) {
-        cp->auto_eject_hosts = CONF_DEFAULT_AUTO_EJECT_HOSTS;
-    }
-
     if (cp->server_connections == CONF_UNSET_NUM) {
         cp->server_connections = CONF_DEFAULT_SERVER_CONNECTIONS;
     } else if (cp->server_connections == 0) {
@@ -1492,25 +1579,16 @@ conf_validate_pool(struct conf *cf, struct conf_pool *cp)
         return NC_ERROR;
     }
 
-    if (cp->server_retry_timeout == CONF_UNSET_NUM) {
-        cp->server_retry_timeout = CONF_DEFAULT_SERVER_RETRY_TIMEOUT;
+    if (cp->sentinel_heartbeat == CONF_UNSET_NUM) {
+        cp->sentinel_heartbeat = CONF_DEFAULT_SENTINEL_HEARTBEAT;
     }
 
-    if (cp->server_failure_limit == CONF_UNSET_NUM) {
-        cp->server_failure_limit = CONF_DEFAULT_SERVER_FAILURE_LIMIT;
+    status = conf_validate_group(cf, cp);
+    if (status != NC_OK) {
+        return status;
     }
 
-    if (!cp->redis && cp->redis_auth.len > 0) {
-        log_error("conf: directive \"redis_auth:\" is only valid for a redis pool");
-        return NC_ERROR;
-    }
-
-    if (!cp->redis && array_n(&cp->redis_master) > 0) {
-        log_error("conf: directive \"redis_master:\" is only valid for a redis pool");
-        return NC_ERROR;
-    }
-
-    status = conf_validate_server(cf, cp);
+    status = conf_validate_sentinel(cf, cp);
     if (status != NC_OK) {
         return status;
     }
@@ -1699,7 +1777,6 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
 
     if (value->data[0] == '/') {
         uint8_t *q, *start, *perm;
-        uint32_t permlen;
 
 
         /* parse "socket_path permissions" from the end */
@@ -1712,7 +1789,7 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
             namelen = value->len;
         } else {
             perm = q + 1;
-            permlen = (uint32_t)(p - perm + 1);
+            
 
             p = q - 1;
             name = start;
@@ -1766,19 +1843,49 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
 }
 
 char *
-conf_add_server(struct conf *cf, struct command *cmd, void *conf)
+conf_add_group(struct conf *cf, struct command *cmd, void *conf)
+{
+    rstatus_t status;
+    uint8_t *p;
+    struct array *a;
+    struct string *field, *value;
+
+    p = conf;
+    a = (struct array *)(p + cmd->offset);
+
+    field = array_push(a);
+    if (field == NULL) {
+        return CONF_ERROR;
+    }
+
+    string_init(field);
+
+    value = array_top(&cf->arg);
+
+    status = string_duplicate(field, value);
+    if (status != NC_OK) {
+        return CONF_ERROR;
+    }
+
+    return CONF_OK;
+}
+
+char *
+conf_add_sentinel(struct conf *cf, struct command *cmd, void *conf)
 {
     rstatus_t status;
     struct array *a;
-    struct string *value, master_str;
-    struct conf_pool *pool;
+    struct string *value;
     struct conf_server *field;
     uint8_t *p, *q, *start;
-    uint8_t *pname, *addr, *port, *weight, *name;
-    uint32_t k, delimlen, pnamelen, addrlen, portlen, weightlen, namelen;
-    char delim[] = " ::";
+    uint8_t *pname, *addr, *port, *name;
+    uint32_t k, delimlen, pnamelen, addrlen, portlen, namelen;
+    char delim[] = " :";
 
-    field = nc_alloc(sizeof(*field));
+    p = conf;
+    a = (struct array *)(p + cmd->offset);
+
+    field = array_push(a);
     if (field == NULL) {
         return CONF_ERROR;
     }
@@ -1787,26 +1894,24 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
 
     value = array_top(&cf->arg);
 
-    /* parse "hostname:port:weight [name]" or "/path/unix_socket:weight [name]" from the end */
+    /* parse "hostname:port [name]" or "/path/unix_socket [name]" from the end */
     p = value->data + value->len - 1;
     start = value->data;
     addr = NULL;
     addrlen = 0;
-    weight = NULL;
-    weightlen = 0;
     port = NULL;
     portlen = 0;
     name = NULL;
     namelen = 0;
 
-    delimlen = value->data[0] == '/' ? 2 : 3;
+    delimlen = 2;
 
     for (k = 0; k < sizeof(delim); k++) {
         q = nc_strrchr(p, start, delim[k]);
         if (q == NULL) {
             if (k == 0) {
                 /*
-                 * name in "hostname:port:weight [name]" format string is
+                 * name in "hostname:port [name]" format string is
                  * optional
                  */
                 continue;
@@ -1821,11 +1926,6 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
             break;
 
         case 1:
-            weight = q + 1;
-            weightlen = (uint32_t)(p - weight + 1);
-            break;
-
-        case 2:
             port = q + 1;
             portlen = (uint32_t)(p - port + 1);
             break;
@@ -1838,25 +1938,19 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
     }
 
     if (k != delimlen) {
-        return "has an invalid \"hostname:port:weight [name]\"or \"/path/unix_socket:weight [name]\" format string";
+        return "has an invalid \"hostname:port [name]\"or \"/path/unix_socket [name]\" format string";
     }
 
     pname = value->data;
     pnamelen = namelen > 0 ? value->len - (namelen + 1) : value->len;
     status = string_copy(&field->pname, pname, pnamelen);
     if (status != NC_OK) {
+        array_pop(a);
         return CONF_ERROR;
     }
 
     addr = start;
     addrlen = (uint32_t)(p - start + 1);
-
-    field->weight = nc_atoi(weight, weightlen);
-    if (field->weight < 0) {
-        return "has an invalid weight in \"hostname:port:weight [name]\" format string";
-    } else if (field->weight == 0) {
-        return "has a zero weight in \"hostname:port:weight [name]\" format string";
-    }
 
     if (value->data[0] != '/') {
         field->port = nc_atoi(port, portlen);
@@ -1899,21 +1993,10 @@ conf_add_server(struct conf *cf, struct command *cmd, void *conf)
 
     field->valid = 1;
 
-    string_set_text(&master_str, "master");
-    // set server array as deault
-    pool = (struct conf_pool *)conf;
-    a = &pool->server;
-    if (string_compare(&field->name, &master_str) == 0) {
-        a = &pool->redis_master;
-        if (array_n(a) > 0) {
-            return "master is duplicate";
-        }
-    }
-    nc_memcpy(array_push(a), field, sizeof(*field));
-    nc_free(field);
-
     return CONF_OK;
 }
+
+
 
 char *
 conf_set_worker_processes(struct conf *cf, struct command *cmd, void *conf)
@@ -1945,6 +2028,7 @@ conf_set_worker_processes(struct conf *cf, struct command *cmd, void *conf)
     }
     return CONF_OK;
 }
+
 
 char *
 conf_set_num(struct conf *cf, struct command *cmd, void *conf)

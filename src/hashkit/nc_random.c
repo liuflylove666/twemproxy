@@ -36,47 +36,10 @@ random_update(struct server_pool *pool)
     uint32_t continuum_index;     /* continuum index */
     uint32_t continuum_addition;  /* extra space in the continuum */
     uint32_t server_index;        /* server index */
-    int64_t now;                  /* current timestamp in usec */
-
-    now = nc_usec_now();
-    if (now < 0) {
-        return NC_ERROR;
-    }
 
     nserver = array_n(&pool->server);
-    nlive_server = 0;
-    pool->next_rebuild = 0LL;
-
-    for (server_index = 0; server_index < nserver; server_index++) {
-        struct server *server = array_get(&pool->server, server_index);
-
-        if (pool->auto_eject_hosts) {
-            if (server->next_retry <= now) {
-                server->next_retry = 0LL;
-                nlive_server++;
-            } else if (pool->next_rebuild == 0LL ||
-                       server->next_retry < pool->next_rebuild) {
-                pool->next_rebuild = server->next_retry;
-            }
-        } else {
-            nlive_server++;
-        }
-    }
-
+    nlive_server = nserver;
     pool->nlive_server = nlive_server;
-
-    if (nlive_server == 0) {
-        ASSERT(pool->continuum != NULL);
-        ASSERT(pool->ncontinuum != 0);
-
-        log_debug(LOG_DEBUG, "no live servers for pool %"PRIu32" '%.*s'",
-                  pool->idx, pool->name.len, pool->name.data);
-
-        return NC_OK;
-    }
-    log_debug(LOG_DEBUG, "%"PRIu32" of %"PRIu32" servers are live for pool "
-              "%"PRIu32" '%.*s'", nlive_server, nserver, pool->idx,
-              pool->name.len, pool->name.data);
 
     continuum_addition = RANDOM_CONTINUUM_ADDITION;
     points_per_server = RANDOM_POINTS_PER_SERVER;
@@ -106,12 +69,6 @@ random_update(struct server_pool *pool)
     continuum_index = 0;
     pointer_counter = 0;
     for (server_index = 0; server_index < nserver; server_index++) {
-        struct server *server = array_get(&pool->server, server_index);
-
-        if (pool->auto_eject_hosts && server->next_retry > now) {
-            continue;
-        }
-
         pointer_per_server = 1;
 
         pool->continuum[continuum_index].index = server_index;

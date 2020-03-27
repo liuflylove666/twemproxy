@@ -78,7 +78,7 @@ typedef enum msg_parse_result {
     ACTION( REQ_REDIS_APPEND )                 /* redis requests - string */                        \
     ACTION( REQ_REDIS_BITCOUNT )                                                                    \
     ACTION( REQ_REDIS_BITOP )                                                                       \
-    ACTION( REQ_REDIS_BITPOS )                                                                      \
+    ACTION( REQ_REDIS_BITPOS )                                                                    \
     ACTION( REQ_REDIS_DECR )                                                                        \
     ACTION( REQ_REDIS_DECRBY )                                                                      \
     ACTION( REQ_REDIS_DUMP )                                                                        \
@@ -169,9 +169,12 @@ typedef enum msg_parse_result {
     ACTION( REQ_REDIS_EVAL )                   /* redis requests - eval */                          \
     ACTION( REQ_REDIS_EVALSHA )                                                                     \
     ACTION( REQ_REDIS_PING )                   /* redis requests - ping/quit */                     \
-    ACTION( REQ_REDIS_QUIT)                                                                         \
-    ACTION( REQ_REDIS_AUTH)                                                                         \
-    ACTION( REQ_REDIS_SELECT)                  /* only during init */                               \
+    ACTION( REQ_REDIS_QUIT )                                                                        \
+    ACTION( REQ_REDIS_AUTH )                                                                        \
+    ACTION( REQ_REDIS_ECHO )                                                                        \
+    ACTION( REQ_REDIS_TIME )                                                                        \
+    ACTION( REQ_REDIS_SELECT )                  /* only during init */                              \
+    ACTION( REQ_REDIS_ROLE )                    /* only during init */                              \
     ACTION( RSP_REDIS_STATUS )                 /* redis response */                                 \
     ACTION( RSP_REDIS_ERROR )                                                                       \
     ACTION( RSP_REDIS_ERROR_ERR )                                                                   \
@@ -190,6 +193,8 @@ typedef enum msg_parse_result {
     ACTION( RSP_REDIS_INTEGER )                                                                     \
     ACTION( RSP_REDIS_BULK )                                                                        \
     ACTION( RSP_REDIS_MULTIBULK )                                                                   \
+    ACTION( SENTINEL_TIMER_HEARTB )                                                                 \
+    ACTION( SENTINEL_TIMER_RECONN )                                                                 \
     ACTION( SENTINEL )                                                                              \
 
 
@@ -273,11 +278,14 @@ TAILQ_HEAD(msg_tqh, msg);
 struct msg *msg_tmo_min(void);
 void msg_tmo_insert(struct msg *msg, struct conn *conn);
 void msg_tmo_delete(struct msg *msg);
+void msg_timer(struct msg *msg, int64_t timeout, void *data);
 
 void msg_init(void);
 void msg_deinit(void);
 struct string *msg_type_string(msg_type_t type);
-struct msg *msg_get(struct conn *conn, bool request, bool redis);
+struct msg *msg_get_raw(void *owner);
+// struct msg *msg_get(struct conn *conn, bool request, bool redis);
+struct msg *msg_get(struct conn *conn, bool request);
 void msg_put(struct msg *msg);
 struct msg *msg_get_error(bool redis, err_t err);
 void msg_dump(struct msg *msg, int level);
@@ -307,11 +315,17 @@ void req_recv_done(struct context *ctx, struct conn *conn, struct msg *msg, stru
 struct msg *req_send_next(struct context *ctx, struct conn *conn);
 void req_send_done(struct context *ctx, struct conn *conn, struct msg *msg);
 
+rstatus_t req_sentinel_send_get_master_addr(struct context *ctx, struct conn *conn);
+rstatus_t req_sentinel_send_heartbeat(struct context *ctx, struct conn *conn);
+rstatus_t req_server_send_role(struct server_pool *pool, struct conn *conn);
+
 struct msg *rsp_get(struct conn *conn);
 void rsp_put(struct msg *msg);
 struct msg *rsp_recv_next(struct context *ctx, struct conn *conn, bool alloc);
 void rsp_recv_done(struct context *ctx, struct conn *conn, struct msg *msg, struct msg *nmsg);
 struct msg *rsp_send_next(struct context *ctx, struct conn *conn);
 void rsp_send_done(struct context *ctx, struct conn *conn, struct msg *msg);
+
+void rsp_sentinel_recv_done(struct context *ctx, struct conn *conn, struct msg *msg, struct msg *nmsg);
 
 #endif

@@ -23,7 +23,8 @@
 #include <nc_proxy.h>
 #include <nc_process.h>
 
-static uint32_t ctx_id; /* context generation */
+// static uint32_t ctx_id; /* context generation */
+
 
 static void
 adjust_openfiles_limit(rlim_t maxfiles) {
@@ -310,6 +311,9 @@ core_close(struct context *ctx, struct conn *conn)
     if (conn->client) {
         type = 'c';
         addrstr = nc_unresolve_peer_desc(conn->sd);
+    } else if (conn->sentinel) {
+        type = 't';
+        addrstr = nc_unresolve_addr(conn->addr, conn->addrlen);
     } else {
         type = conn->proxy ? 'p' : 's';
         addrstr = nc_unresolve_addr(conn->addr, conn->addrlen);
@@ -345,11 +349,80 @@ core_error(struct context *ctx, struct conn *conn)
 }
 
 static void
+core_timeout_handle_sentinel_heartb(struct context *ctx, struct msg *msg)
+{
+    struct conn *conn;
+    struct server *sentinel;
+    struct server_pool *pool;
+
+    sentinel = msg->tmo_rbe.data;
+    pool = sentinel->owner;
+    log_debug(LOG_INFO, "sentinel heartb msg id %"PRIu64" owner %p type %d fired", 
+              msg->id, sentinel, msg->type);
+    msg_tmo_delete(msg);
+
+    conn = sentinel_conn(sentinel);
+    if (conn != NULL && conn->connected) {
+        req_sentinel_send_heartbeat(pool->ctx, conn);
+        msg_timer(msg, pool->sentinel_heartbeat, sentinel);
+        return;
+    }
+
+    /* switch to connect the next sentinel */
+    sentinel_connect(pool);
+}
+
+static void
+core_timeout_handle_sentinel_reconn(struct context *ctx, struct msg *msg)
+{
+    struct server *sentinel;
+    struct server_pool *pool;
+
+    sentinel = msg->tmo_rbe.data;
+    pool = sentinel->owner;
+
+    log_debug(LOG_INFO, "sentinel reconn msg id %"PRIu64" owner %p type %d fired", 
+              msg->id, sentinel, msg->type);
+    msg_tmo_delete(msg);
+
+    sentinel_connect(pool);
+}
+
+static void
+core_timeout_handle_common(struct context *ctx, struct msg *msg)
+{
+    struct conn *conn;
+
+    conn = msg->tmo_rbe.data;
+    log_debug(LOG_INFO, "req %"PRIu64" on s %d timedout", msg->id, conn->sd);
+    msg_tmo_delete(msg);
+
+    conn->err = ETIMEDOUT;
+
+    core_close(ctx, conn);
+}
+
+static void
+core_timeout_handle(struct context *ctx, struct msg *msg)
+{
+    switch (msg->type) {
+    case MSG_SENTINEL_TIMER_HEARTB:
+        core_timeout_handle_sentinel_heartb(ctx, msg);
+        break;
+    case MSG_SENTINEL_TIMER_RECONN:
+        core_timeout_handle_sentinel_reconn(ctx, msg);
+        break;
+    default:
+        core_timeout_handle_common(ctx, msg);
+        break;
+    }
+}
+
+static void
 core_timeout(struct context *ctx)
 {
     for (;;) {
         struct msg *msg;
-        struct conn *conn;
         int64_t now, then;
 
         msg = msg_tmo_min();
@@ -369,8 +442,6 @@ core_timeout(struct context *ctx)
          * timeout expired req and all the outstanding req on the timing
          * out server
          */
-
-        conn = msg->tmo_rbe.data;
         then = msg->tmo_rbe.key;
 
         now = nc_msec_now();
@@ -380,12 +451,7 @@ core_timeout(struct context *ctx)
             return;
         }
 
-        log_debug(LOG_INFO, "req %"PRIu64" on s %d timedout", msg->id, conn->sd);
-
-        msg_tmo_delete(msg);
-        conn->err = ETIMEDOUT;
-
-        core_close(ctx, conn);
+        core_timeout_handle(ctx, msg);
     }
 }
 
@@ -396,7 +462,7 @@ core_core(void *evb, void *arg, uint32_t events)
     struct conn *conn = arg;
     struct context *ctx;
 
-    if (conn->owner == NULL) {
+    if (conn->owner == NULL || conn->sd == -1) {
         log_warn("conn is already unrefed!");
         return NC_OK;
     }
@@ -404,7 +470,7 @@ core_core(void *evb, void *arg, uint32_t events)
     ctx = conn_to_ctx(conn);
 
     log_debug(LOG_VVERB, "event %04"PRIX32" on %c %d", events,
-              conn->client ? 'c' : (conn->proxy ? 'p' : 's'), conn->sd);
+              conn->client?'c':(conn->sentinel?'t':(conn->proxy?'p':'s')), conn->sd);
 
     conn->events = events;
 

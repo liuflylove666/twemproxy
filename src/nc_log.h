@@ -39,7 +39,6 @@ struct logger {
 #define LOG_PVERB   11  /* periodic verbose messages on crack */
 #define LOG_LEVEN_N 12  /* # of log level */
 
-
 #define LOG_MAX_LEN 256 /* max length of log message */
 
 /*
@@ -89,11 +88,11 @@ struct logger {
 } while (0)
 
 #define loga(...) do {                                                      \
-    _log(LOG_INFO, __FILE__, __LINE__, 0, __VA_ARGS__);                     \
+    _log(LOG_NOTICE, __FILE__, __LINE__, 0, __VA_ARGS__);                               \
 } while (0)
 
 #define loga_hexdump(_data, _datalen, ...) do {                             \
-    _log(LOG_INFO, __FILE__, __LINE__, 0, __VA_ARGS__);                     \
+    _log(LOG_NOTICE, __FILE__, __LINE__, 0, __VA_ARGS__);                               \
     _log_hexdump(__FILE__, __LINE__, (char *)(_data), (int)(_datalen),      \
                  __VA_ARGS__);                                              \
 } while (0)                                                                 \

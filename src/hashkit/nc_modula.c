@@ -38,55 +38,11 @@ modula_update(struct server_pool *pool)
     uint32_t server_index;        /* server index */
     uint32_t weight_index;        /* weight index */
     uint32_t total_weight;        /* total live server weight */
-    int64_t now;                  /* current timestamp in usec */
-
-    now = nc_usec_now();
-    if (now < 0) {
-        return NC_ERROR;
-    }
 
     nserver = array_n(&pool->server);
-    nlive_server = 0;
-    total_weight = 0;
-    pool->next_rebuild = 0LL;
-
-    for (server_index = 0; server_index < nserver; server_index++) {
-        struct server *server = array_get(&pool->server, server_index);
-
-        if (pool->auto_eject_hosts) {
-            if (server->next_retry <= now) {
-                server->next_retry = 0LL;
-                nlive_server++;
-            } else if (pool->next_rebuild == 0LL ||
-                       server->next_retry < pool->next_rebuild) {
-                pool->next_rebuild = server->next_retry;
-            }
-        } else {
-            nlive_server++;
-        }
-
-        ASSERT(server->weight > 0);
-
-        /* count weight only for live servers */
-        if (!pool->auto_eject_hosts || server->next_retry <= now) {
-            total_weight += server->weight;
-        }
-    }
-
+    nlive_server = nserver;
+    total_weight = nserver;
     pool->nlive_server = nlive_server;
-
-    if (nlive_server == 0) {
-        ASSERT(pool->continuum != NULL);
-        ASSERT(pool->ncontinuum != 0);
-
-        log_debug(LOG_DEBUG, "no live servers for pool %"PRIu32" '%.*s'",
-                  pool->idx, pool->name.len, pool->name.data);
-
-        return NC_OK;
-    }
-    log_debug(LOG_DEBUG, "%"PRIu32" of %"PRIu32" servers are live for pool "
-              "%"PRIu32" '%.*s'", nlive_server, nserver, pool->idx,
-              pool->name.len, pool->name.data);
 
     continuum_addition = MODULA_CONTINUUM_ADDITION;
     points_per_server = MODULA_POINTS_PER_SERVER;
@@ -115,10 +71,6 @@ modula_update(struct server_pool *pool)
     pointer_counter = 0;
     for (server_index = 0; server_index < nserver; server_index++) {
         struct server *server = array_get(&pool->server, server_index);
-
-        if (pool->auto_eject_hosts && server->next_retry > now) {
-            continue;
-        }
 
         for (weight_index = 0; weight_index < server->weight; weight_index++) {
             pointer_per_server = 1;
